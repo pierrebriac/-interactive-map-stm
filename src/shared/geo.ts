@@ -201,3 +201,76 @@ export function pointToPolylineDistanceKm(
 
   return minimum
 }
+
+export function projectPointToPolyline(
+  point: [number, number],
+  coordinates: [number, number][],
+) {
+  if (coordinates.length === 0) {
+    return {
+      distanceKm: Number.POSITIVE_INFINITY,
+      distanceAlongKm: 0,
+      coordinate: [0, 0] as [number, number],
+    }
+  }
+
+  if (coordinates.length === 1) {
+    const [lon, lat] = coordinates[0]
+    return {
+      distanceKm: haversineKm(point[1], point[0], lat, lon),
+      distanceAlongKm: 0,
+      coordinate: coordinates[0],
+    }
+  }
+
+  const scale = Math.cos((point[1] * Math.PI) / 180)
+  let minimum = Number.POSITIVE_INFINITY
+  let distanceAlongKm = 0
+  let traveledKm = 0
+  let bestCoordinate = coordinates[0]
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const start = coordinates[index - 1]
+    const end = coordinates[index]
+    const [startLon, startLat] = start
+    const [endLon, endLat] = end
+    const [pointLon, pointLat] = point
+
+    const px = pointLon * scale
+    const py = pointLat
+    const sx = startLon * scale
+    const sy = startLat
+    const ex = endLon * scale
+    const ey = endLat
+
+    const dx = ex - sx
+    const dy = ey - sy
+    const denominator = dx * dx + dy * dy
+    const projection =
+      denominator === 0
+        ? 0
+        : Math.max(
+            0,
+            Math.min(1, ((px - sx) * dx + (py - sy) * dy) / denominator),
+          )
+
+    const closestLon = (sx + projection * dx) / scale
+    const closestLat = sy + projection * dy
+    const distanceKm = haversineKm(pointLat, pointLon, closestLat, closestLon)
+    const segmentLengthKm = haversineKm(startLat, startLon, endLat, endLon)
+
+    if (distanceKm < minimum) {
+      minimum = distanceKm
+      distanceAlongKm = traveledKm + segmentLengthKm * projection
+      bestCoordinate = [closestLon, closestLat]
+    }
+
+    traveledKm += segmentLengthKm
+  }
+
+  return {
+    distanceKm: minimum,
+    distanceAlongKm,
+    coordinate: bestCoordinate,
+  }
+}

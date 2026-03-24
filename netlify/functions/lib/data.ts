@@ -120,6 +120,7 @@ const SNAPSHOT_PATH = resolve(PROJECT_ROOT, 'generated/network-model.json')
 
 export async function getBootstrapData() {
   const model = await getInternalModel()
+  model.bootstrap.styles = getStyleOptions()
   return model.bootstrap
 }
 
@@ -280,6 +281,7 @@ async function getInternalModel(): Promise<InternalModel> {
   staticModelPromise = loadSnapshotModel()
     .catch(() => buildStaticModel())
     .then((value) => {
+      value.bootstrap.styles = getStyleOptions()
       staticModelCache = {
         expiresAt: Date.now() + STATIC_CACHE_TTL_MS,
         value,
@@ -298,7 +300,7 @@ async function getInternalModel(): Promise<InternalModel> {
 async function loadSnapshotModel() {
   const raw = await readFile(SNAPSHOT_PATH, 'utf8')
   const serialized = JSON.parse(raw) as SerializedModel
-  return hydrateModel(serialized)
+  return applyRuntimeBootstrapSettings(hydrateModel(serialized))
 }
 
 async function getLiveSnapshot(model: InternalModel): Promise<LiveSnapshot> {
@@ -533,6 +535,11 @@ function hydrateModel(serialized: SerializedModel): InternalModel {
     remCalendars: serialized.remCalendars,
     remCalendarDates: serialized.remCalendarDates,
   }
+}
+
+function applyRuntimeBootstrapSettings(model: InternalModel) {
+  model.bootstrap.styles = getStyleOptions()
+  return model
 }
 
 async function buildLiveSnapshot(model: InternalModel): Promise<LiveSnapshot> {

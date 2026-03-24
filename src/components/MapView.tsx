@@ -16,6 +16,7 @@ import type {
   FavoriteItem,
   LiveResponse,
   MapStyle,
+  RouteSummary,
   SearchItem,
   ShapeFeature,
   StationSummary,
@@ -30,6 +31,7 @@ interface MapViewProps {
   viewMode: ViewMode
   mapStyle: MapStyle
   favoritesFocus: FavoriteItem[]
+  onSelectItem: (item: SearchItem) => void
 }
 
 const EMPTY_COLLECTION = {
@@ -44,11 +46,19 @@ export function MapView({
   viewMode,
   mapStyle,
   favoritesFocus,
+  onSelectItem,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
   const fittedInitialBoundsRef = useRef(false)
   const activeStyleRef = useRef<MapStyle>(mapStyle)
+  const bootstrapRef = useRef<BootstrapResponse | null>(bootstrap)
+  const onSelectItemRef = useRef(onSelectItem)
+
+  useEffect(() => {
+    bootstrapRef.current = bootstrap
+    onSelectItemRef.current = onSelectItem
+  }, [bootstrap, onSelectItem])
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -65,15 +75,25 @@ export function MapView({
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right')
 
-    map.on('load', () => {
-      ensureLayers(map)
-    })
+    const selectRouteById = (routeId: string) => {
+      const route = bootstrapRef.current?.routes.find((entry) => entry.id === routeId)
+      if (!route) {
+        return
+      }
 
-    map.on('style.load', () => {
-      ensureLayers(map)
-    })
+      onSelectItemRef.current(toRouteSearchItem(route))
+    }
 
-    map.on('click', 'bus-clusters', (event) => {
+    const selectStationById = (stationId: string) => {
+      const station = bootstrapRef.current?.stations.find((entry) => entry.id === stationId)
+      if (!station) {
+        return
+      }
+
+      onSelectItemRef.current(toStationSearchItem(station))
+    }
+
+    const handleClusterClick = (event: maplibregl.MapLayerMouseEvent) => {
       const feature = event.features?.[0]
       const clusterId = feature?.properties?.cluster_id
       const source = map.getSource('buses') as GeoJSONSource | undefined
@@ -90,16 +110,68 @@ export function MapView({
           duration: 600,
         })
       })
+    }
+
+    const handleRouteClick = (event: maplibregl.MapLayerMouseEvent) => {
+      const routeId = `${event.features?.[0]?.properties?.routeId ?? ''}`
+      if (routeId) {
+        selectRouteById(routeId)
+      }
+    }
+
+    const handleStationClick = (event: maplibregl.MapLayerMouseEvent) => {
+      const stationId = `${event.features?.[0]?.properties?.id ?? ''}`
+      if (stationId) {
+        selectStationById(stationId)
+      }
+    }
+
+    const setPointer = () => {
+      map.getCanvas().style.cursor = 'pointer'
+    }
+
+    const clearPointer = () => {
+      map.getCanvas().style.cursor = ''
+    }
+
+    map.on('load', () => {
+      ensureLayers(map)
     })
+
+    map.on('style.load', () => {
+      ensureLayers(map)
+    })
+
+    map.on('click', 'bus-clusters', handleClusterClick)
+    map.on('click', 'bus-points', handleRouteClick)
+    map.on('click', 'rail-points', handleRouteClick)
+    map.on('click', 'route-lines', handleRouteClick)
+    map.on('click', 'stations', handleStationClick)
+
+    for (const layerId of ['bus-clusters', 'bus-points', 'rail-points', 'route-lines', 'stations']) {
+      map.on('mouseenter', layerId, setPointer)
+      map.on('mouseleave', layerId, clearPointer)
+    }
 
     mapRef.current = map
     activeStyleRef.current = mapStyle
 
     return () => {
+      map.off('click', 'bus-clusters', handleClusterClick)
+      map.off('click', 'bus-points', handleRouteClick)
+      map.off('click', 'rail-points', handleRouteClick)
+      map.off('click', 'route-lines', handleRouteClick)
+      map.off('click', 'stations', handleStationClick)
+
+      for (const layerId of ['bus-clusters', 'bus-points', 'rail-points', 'route-lines', 'stations']) {
+        map.off('mouseenter', layerId, setPointer)
+        map.off('mouseleave', layerId, clearPointer)
+      }
+
       map.remove()
       mapRef.current = null
     }
-  }, [mapStyle])
+  }, [mapStyle, onSelectItem])
 
   useEffect(() => {
     const map = mapRef.current
@@ -142,10 +214,19 @@ export function MapView({
       return
     }
 
-    if (selectedItem) {
+    if (selectedItem?.type === 'route') {
+      const selectedShapes = bootstrap.shapes.filter(
+        (shape) => shape.routeId === selectedItem.id,
+      )
+      const bounds = computeBounds(selectedShapes.flatMap((shape) => shape.coordinates))
+      map.fitBounds(bounds, { padding: 96, duration: 750 })
+      return
+    }
+
+    if (selectedItem?.type === 'station') {
       map.easeTo({
         center: [selectedItem.lon, selectedItem.lat],
-        zoom: selectedItem.type === 'station' ? 13.4 : 11.8,
+        zoom: 13.6,
         duration: 700,
       })
       return
@@ -217,7 +298,7 @@ function ensureLayers(map: Map) {
       'text-color': '#f8f8f1',
       'text-halo-color': '#13222d',
       'text-halo-width': 1,
-      'text-opacity': 0.85,
+      'text-opacity': 0.88,
     },
   })
 
@@ -297,6 +378,7 @@ function ensureLayers(map: Map) {
       'circle-color': ['coalesce', ['get', 'color'], '#ff6c37'],
       'circle-stroke-width': 2,
       'circle-stroke-color': '#fffaf1',
+      'circle-opacity': ['coalesce', ['get', 'opacity'], 0.92],
     },
   })
 
@@ -316,6 +398,7 @@ function ensureLayers(map: Map) {
       'text-color': '#fffaf1',
       'text-halo-color': '#152027',
       'text-halo-width': 0.8,
+      'text-opacity': ['coalesce', ['get', 'textOpacity'], 0.88],
     },
   })
 
@@ -410,7 +493,10 @@ function buildRouteCollection(
 
   return {
     type: 'FeatureCollection',
-    features: shapes.map((shape) => routeToFeature(shape, selectedRouteId)),
+    features: shapes.map((shape) => {
+      const route = bootstrap.routes.find((entry) => entry.id === shape.routeId)
+      return routeToFeature(shape, route ?? null, selectedRouteId)
+    }),
   }
 }
 
@@ -460,9 +546,12 @@ function buildBusCollection(
       },
       properties: {
         id: entity.id,
+        routeId: entity.routeId,
         label: entity.label,
         color: selectedRouteId === entity.routeId ? '#ff6c37' : '#f58c49',
-        radius: selectedRouteId === entity.routeId ? 9 : 7,
+        radius: selectedRouteId === entity.routeId ? 9.5 : 7,
+        opacity: selectedRouteId && selectedRouteId !== entity.routeId ? 0.34 : 0.92,
+        textOpacity: selectedRouteId && selectedRouteId !== entity.routeId ? 0.18 : 0.88,
       },
     })),
   }
@@ -485,6 +574,7 @@ function buildRailCollection(
       },
       properties: {
         id: entity.id,
+        routeId: entity.routeId,
         label: entity.label,
         color: routeColorForMode(entity.routeId, entity.mode),
         radius: selectedRouteId === entity.routeId ? 10 : 8,
@@ -495,6 +585,7 @@ function buildRailCollection(
 
 function routeToFeature(
   shape: ShapeFeature,
+  route: RouteSummary | null,
   selectedRouteId: string | null,
 ): Feature<LineString> {
   return {
@@ -506,9 +597,18 @@ function routeToFeature(
     properties: {
       routeId: shape.routeId,
       color: shape.color,
-      label: shape.mode === 'bus' ? '' : shape.routeId.replace(/^S/, 'A'),
-      lineWidth: selectedRouteId === shape.routeId ? 5.2 : shape.mode === 'bus' ? 2.4 : 3.3,
-      opacity: selectedRouteId && selectedRouteId !== shape.routeId ? 0.25 : 0.88,
+      label:
+        shape.mode === 'bus'
+          ? route?.shortName ?? ''
+          : route?.shortName?.replace(/^S/, 'A') ?? shape.routeId.replace(/^S/, 'A'),
+      lineWidth:
+        selectedRouteId === shape.routeId ? 5.4 : shape.mode === 'bus' ? 2.4 : 3.3,
+      opacity:
+        selectedRouteId && selectedRouteId !== shape.routeId
+          ? 0.2
+          : selectedRouteId === shape.routeId
+            ? 0.96
+            : 0.86,
     },
   }
 }
@@ -541,4 +641,33 @@ function routeColorForMode(routeId: string, mode: ShapeFeature['mode']) {
   }
 
   return '#52ad43'
+}
+
+function toRouteSearchItem(route: RouteSummary): SearchItem {
+  return {
+    type: 'route',
+    id: route.id,
+    mode: route.mode,
+    label: route.shortName,
+    subtitle:
+      route.mode === 'bus'
+        ? `Bus • ${route.longName}`
+        : route.mode === 'metro'
+          ? `Métro • ${route.longName}`
+          : `REM • ${route.longName}`,
+    lat: route.center[1],
+    lon: route.center[0],
+  }
+}
+
+function toStationSearchItem(station: StationSummary): SearchItem {
+  return {
+    type: 'station',
+    id: station.id,
+    mode: station.mode,
+    label: station.name,
+    subtitle: station.mode === 'metro' ? 'Station de métro' : 'Station du REM',
+    lat: station.lat,
+    lon: station.lon,
+  }
 }
