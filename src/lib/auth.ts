@@ -4,6 +4,12 @@ import netlifyIdentity, {
 import type { IdentitySession } from '../shared/types.ts'
 
 let initialized = false
+const IDENTITY_TOKEN_TYPES = [
+  'confirmation',
+  'invite',
+  'recovery',
+  'email_change',
+] as const
 
 function toSession(user: IdentityUser | null, token: string | null) {
   if (!user) {
@@ -21,6 +27,8 @@ export function initIdentity() {
   if (typeof window === 'undefined' || initialized) {
     return
   }
+
+  normalizeIdentityTokenLocation()
 
   netlifyIdentity.init({
     locale: 'fr',
@@ -80,4 +88,35 @@ export function openIdentity(tab: 'login' | 'signup') {
 export async function logoutIdentity() {
   initIdentity()
   await netlifyIdentity.logout()
+}
+
+function normalizeIdentityTokenLocation() {
+  const url = new URL(window.location.href)
+  const normalizedHash = url.hash.replace(/^#\/?/, '')
+
+  if (hasIdentityToken(normalizedHash)) {
+    return
+  }
+
+  for (const tokenType of IDENTITY_TOKEN_TYPES) {
+    const key = `${tokenType}_token`
+    const token = url.searchParams.get(key)
+    if (!token) {
+      continue
+    }
+
+    url.searchParams.delete(key)
+    const nextHash = `${key}=${encodeURIComponent(token)}`
+    const nextUrl =
+      `${url.pathname}${url.searchParams.toString() ? `?${url.searchParams.toString()}` : ''}#${nextHash}`
+
+    window.history.replaceState({}, '', nextUrl)
+    return
+  }
+}
+
+function hasIdentityToken(value: string) {
+  return IDENTITY_TOKEN_TYPES.some((tokenType) =>
+    value.includes(`${tokenType}_token=`),
+  )
 }

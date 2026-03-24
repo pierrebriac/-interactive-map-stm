@@ -95,6 +95,7 @@ function App() {
   const [planItineraries, setPlanItineraries] = useState<Itinerary[]>([])
   const [planWarnings, setPlanWarnings] = useState<string[]>([])
   const [selectedItineraryId, setSelectedItineraryId] = useState<string | null>(null)
+  const [planRequestNonce, setPlanRequestNonce] = useState(0)
   const [isPlanning, setIsPlanning] = useState(false)
   const [planError, setPlanError] = useState<string | null>(null)
   const [appError, setAppError] = useState<string | null>(null)
@@ -108,8 +109,13 @@ function App() {
   const [currentLocation, setCurrentLocation] = useState<ResolvedPlace | null>(null)
   const [isLocating, setIsLocating] = useState(false)
   const [locationHint, setLocationHint] = useState<string | null>(null)
+  const [hasRequestedLocation, setHasRequestedLocation] = useState(false)
   const [browserLocationPreference, setBrowserLocationPreference] =
     useState<LocationPreference>('unknown')
+  const [isSavePlaceOpen, setIsSavePlaceOpen] = useState(false)
+  const [savePlaceKind, setSavePlaceKind] = useState<SavedPlace['kind']>('saved')
+  const [savePlaceName, setSavePlaceName] = useState('')
+  const [savePlaceError, setSavePlaceError] = useState<string | null>(null)
   const hasInitializedCameraRef = useRef(false)
 
   useEffect(() => {
@@ -129,6 +135,7 @@ function App() {
         const data = await fetchBootstrap()
         if (!cancelled) {
           setBootstrap(data)
+          setAppError(null)
         }
       } catch (error) {
         if (!cancelled) {
@@ -187,6 +194,7 @@ function App() {
 
         setFavorites(favoritesResponse.favorites)
         setProfile(profileResponse.profile)
+        setAppError(null)
       } catch (error) {
         if (!cancelled) {
           setAppError(
@@ -323,6 +331,18 @@ function App() {
     null
 
   useEffect(() => {
+    if (!selectedPlace) {
+      setIsSavePlaceOpen(false)
+      setSavePlaceError(null)
+      return
+    }
+
+    setSavePlaceKind('saved')
+    setSavePlaceName(defaultSavedPlaceName(selectedPlace))
+    setSavePlaceError(null)
+  }, [selectedPlace])
+
+  useEffect(() => {
     if (!bootstrap) {
       return
     }
@@ -345,11 +365,7 @@ function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setAppError(
-            error instanceof Error
-              ? error.message
-              : 'Impossible de charger les positions live.',
-          )
+          console.error(error)
         }
       } finally {
         if (!cancelled) {
@@ -400,11 +416,8 @@ function App() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setAppError(
-            error instanceof Error
-              ? error.message
-              : 'Impossible de charger les suggestions d’adresses.',
-          )
+          console.error(error)
+          setSearchPlaces([])
         }
       })
       .finally(() => {
@@ -435,11 +448,8 @@ function App() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setAppError(
-            error instanceof Error
-              ? error.message
-              : 'Impossible de charger les suggestions de trajet.',
-          )
+          console.error(error)
+          setRouteSuggestions([])
         }
       })
 
@@ -459,21 +469,39 @@ function App() {
     }).map(toResolvedPlace)
   }, [bootstrap, routeSuggestionQuery, surfaceMode])
 
+  const routeSavedPlaceSuggestions = useMemo(() => {
+    if (surfaceMode !== 'route') {
+      return []
+    }
+
+    return searchSavedPlaces(profile.savedPlaces, routeSuggestionQuery)
+      .slice(0, 5)
+      .map(toResolvedPlace)
+  }, [profile.savedPlaces, routeSuggestionQuery, surfaceMode])
+
   const effectiveRouteSuggestions = useMemo(() => {
     const deduped = new Map<string, ResolvedPlace>()
 
-    for (const suggestion of [...routeSuggestions, ...routeStationSuggestions]) {
+    for (const suggestion of [
+      ...routeSavedPlaceSuggestions,
+      ...routeSuggestions,
+      ...routeStationSuggestions,
+    ]) {
       deduped.set(`${suggestion.id}:${suggestion.address}`, suggestion)
     }
 
     return Array.from(deduped.values()).slice(0, 8)
-  }, [routeStationSuggestions, routeSuggestions])
+  }, [routeSavedPlaceSuggestions, routeStationSuggestions, routeSuggestions])
 
   useEffect(() => {
     if (!routeOrigin || !routeDestination || surfaceMode !== 'route') {
       setPlanItineraries([])
       setPlanWarnings([])
       setPlanError(null)
+      return
+    }
+
+    if (planRequestNonce === 0) {
       return
     }
 
@@ -503,7 +531,12 @@ function App() {
         }
 
         setPlanItineraries(response.itineraries)
-        setPlanWarnings(response.warnings)
+        setPlanWarnings(
+          uniqueStrings([
+            ...response.warnings,
+            ...response.itineraries.flatMap((itinerary) => itinerary.warnings),
+          ]),
+        )
         setSelectedItineraryId(response.itineraries[0]?.id ?? null)
       })
       .catch((error) => {
@@ -526,7 +559,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [routeDestination, routeMode, routeOrigin, surfaceMode])
+  }, [planRequestNonce, routeDestination, routeMode, routeOrigin, surfaceMode])
 
   useEffect(() => {
     if (!bootstrap || hasInitializedCameraRef.current) {
@@ -608,11 +641,12 @@ function App() {
 
   const searchSections = useMemo(
     () => ({
+      savedPlaces: searchSavedPlaces(profile.savedPlaces, deferredSearchQuery).slice(0, 6),
       routes: networkSearchResults.filter((item) => item.type === 'route'),
       stations: networkSearchResults.filter((item) => item.type === 'station'),
       places: searchPlaces,
     }),
-    [networkSearchResults, searchPlaces],
+    [deferredSearchQuery, networkSearchResults, profile.savedPlaces, searchPlaces],
   )
 
   const serviceStatusSummary = summarizeServiceStates(live?.serviceStates ?? [])
@@ -690,6 +724,12 @@ function App() {
         setIsSidebarOpen(false)
       }
     })
+  }
+
+  const handleSelectSavedSearchPlace = async (place: SavedPlace) => {
+    setSearchQuery(place.name)
+    setIsSearchExpanded(false)
+    await handleRouteToSavedPlace(place)
   }
 
   const handleOpenRoute = (destination?: ResolvedPlace | SavedPlace | SearchItem) => {
@@ -837,7 +877,7 @@ function App() {
     })
   }
 
-  const handleSaveSelectedPlace = async (kind: SavedPlace['kind']) => {
+  const handleStartSaveSelectedPlace = (kind: SavedPlace['kind'] = 'saved') => {
     if (!session?.token) {
       openIdentity('signup')
       return
@@ -847,18 +887,47 @@ function App() {
       return
     }
 
-    const nextPlace = toSavedPlace(selectedPlace, kind)
+    setSavePlaceKind(kind)
+    setSavePlaceName(defaultSavedPlaceName(selectedPlace, kind))
+    setSavePlaceError(null)
+    setIsSavePlaceOpen(true)
+  }
+
+  const handleSaveSelectedPlace = async () => {
+    if (!session?.token) {
+      openIdentity('signup')
+      return
+    }
+
+    if (!selectedPlace) {
+      return
+    }
+
+    const trimmedName = savePlaceName.trim()
+    if (savePlaceKind === 'saved' && !trimmedName) {
+      setSavePlaceError('Donne un nom court à cette adresse pour la retrouver ensuite.')
+      return
+    }
+
+    const nextPlace = toSavedPlace(
+      selectedPlace,
+      savePlaceKind,
+      trimmedName || defaultSavedPlaceName(selectedPlace, savePlaceKind),
+    )
     const basePlaces = profile.savedPlaces.filter((place) =>
-      kind === 'saved' ? place.id !== nextPlace.id : place.kind !== kind,
+      savePlaceKind === 'saved' ? place.id !== nextPlace.id : place.kind !== savePlaceKind,
     )
 
     await persistProfile({
       ...profile,
       savedPlaces:
-        kind === 'saved'
-          ? [nextPlace, ...basePlaces].slice(0, 10)
+        savePlaceKind === 'saved'
+          ? [nextPlace, ...basePlaces].slice(0, 22)
           : [nextPlace, ...basePlaces],
     })
+
+    setIsSavePlaceOpen(false)
+    setSavePlaceError(null)
   }
 
   const handleDeleteSavedPlace = async (placeId: string) => {
@@ -869,6 +938,29 @@ function App() {
     await persistProfile({
       ...profile,
       savedPlaces: profile.savedPlaces.filter((place) => place.id !== placeId),
+    })
+  }
+
+  const handleRenameSavedPlace = async (place: SavedPlace) => {
+    if (!session?.token || typeof window === 'undefined') {
+      return
+    }
+
+    const nextName = window.prompt('Nom de cette adresse', place.name)
+    if (nextName === null) {
+      return
+    }
+
+    const trimmed = nextName.trim()
+    if (!trimmed) {
+      return
+    }
+
+    await persistProfile({
+      ...profile,
+      savedPlaces: profile.savedPlaces.map((entry) =>
+        entry.id === place.id ? { ...entry, name: trimmed.slice(0, 60) } : entry,
+      ),
     })
   }
 
@@ -890,6 +982,20 @@ function App() {
   const requestCurrentLocation = async () => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
       setLocationHint('La géolocalisation n’est pas disponible sur cet appareil.')
+      return null
+    }
+
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      setLocationHint('La localisation nécessite une connexion sécurisée en https.')
+      return null
+    }
+
+    setHasRequestedLocation(true)
+
+    if (browserLocationPreference === 'denied' && !currentLocation) {
+      setLocationHint(
+        'La localisation est déjà bloquée par le navigateur. Autorise-la dans les réglages du site puis réessaie.',
+      )
       return null
     }
 
@@ -924,7 +1030,7 @@ function App() {
           setBrowserLocationPreference(nextPreference)
           setLocationHint(
             nextPreference === 'denied'
-              ? 'Accès à la localisation refusé.'
+              ? 'La localisation est bloquée par le navigateur. Autorise-la dans les réglages du site puis réessaie.'
               : 'La demande de localisation a été fermée ou interrompue.',
           )
           await syncLocationPreference(nextPreference)
@@ -949,6 +1055,10 @@ function App() {
     setRouteOrigin(place)
     setRouteOriginQuery(CURRENT_LOCATION_PLACEHOLDER)
     setActiveRouteField('destination')
+
+    if (routeDestination) {
+      setPlanRequestNonce((value) => value + 1)
+    }
   }
 
   const handleLocateFromSidebar = async () => {
@@ -979,6 +1089,7 @@ function App() {
       setRouteOriginQuery(CURRENT_LOCATION_PLACEHOLDER)
       setRouteDestination(toResolvedPlace(place))
       setRouteDestinationQuery(place.address)
+      setPlanRequestNonce((value) => value + 1)
     }
   }
 
@@ -989,12 +1100,18 @@ function App() {
       setRouteOrigin(place)
       setRouteOriginQuery(displayValue)
       setActiveRouteField('destination')
+      if (routeDestination) {
+        setPlanRequestNonce((value) => value + 1)
+      }
       return
     }
 
     setRouteDestination(place)
     setRouteDestinationQuery(displayValue)
     setActiveRouteField('origin')
+    if (routeOrigin) {
+      setPlanRequestNonce((value) => value + 1)
+    }
   }
 
   const handleRouteSwap = () => {
@@ -1002,6 +1119,9 @@ function App() {
     setRouteDestination(routeOrigin)
     setRouteOriginQuery(routeDestinationQuery)
     setRouteDestinationQuery(routeOriginQuery)
+    if (routeOrigin && routeDestination) {
+      setPlanRequestNonce((value) => value + 1)
+    }
   }
 
   const handleResolveRouteInputs = async () => {
@@ -1014,6 +1134,23 @@ function App() {
     if (!resolvedOrigin || !resolvedDestination) {
       setPlanError('Entre un départ et une arrivée valides dans Montréal.')
       return
+    }
+
+    setPlanRequestNonce((value) => value + 1)
+  }
+
+  const handleUseTypedRouteQuery = async () => {
+    const resolved = await resolveRouteField(activeRouteField)
+    if (!resolved) {
+      setPlanError('Cette adresse n’a pas pu être résolue dans Montréal.')
+      return
+    }
+
+    if (
+      (activeRouteField === 'origin' && routeDestination) ||
+      (activeRouteField === 'destination' && routeOrigin)
+    ) {
+      setPlanRequestNonce((value) => value + 1)
     }
   }
 
@@ -1053,11 +1190,11 @@ function App() {
       const geocoded = await fetchGeocode(query, 1)
       const bestPlace = geocoded.features[0]
       if (bestPlace) {
-        setResolvedRouteField(field, bestPlace, bestPlace.address)
+        setResolvedRouteField(field, bestPlace, query)
         return bestPlace
       }
     } catch (error) {
-      setAppError(
+      setPlanError(
         error instanceof Error
           ? error.message
           : 'Impossible de géocoder cette adresse.',
@@ -1107,6 +1244,7 @@ function App() {
     Boolean(searchQuery.trim()) ||
     searchSections.routes.length > 0 ||
     searchSections.stations.length > 0 ||
+    searchSections.savedPlaces.length > 0 ||
     searchSections.places.length > 0
 
   return (
@@ -1249,6 +1387,10 @@ function App() {
                 </label>
               </div>
 
+              <p className="panel-copy">
+                Entre une adresse complète, un lieu ou une station. Exemple: 6920 avenue des Érables.
+              </p>
+
               <div className="route-chip-row">
                 <button className="small-chip" onClick={() => void handleUseCurrentLocationAsOrigin()}>
                   {isLocating ? 'Localisation…' : CURRENT_LOCATION_PLACEHOLDER}
@@ -1277,7 +1419,7 @@ function App() {
               <div className="mode-switch">
                 {(
                   [
-                    ['transit', 'Transit'],
+                    ['transit', 'Transport en commun'],
                     ['walking', 'À pied'],
                     ['cycling', 'Vélo'],
                   ] as const
@@ -1307,18 +1449,25 @@ function App() {
                     setPlanWarnings([])
                     setPlanItineraries([])
                     setSelectedItineraryId(null)
+                    setPlanRequestNonce(0)
                   }}
                 >
                   Effacer
                 </button>
               </div>
 
-              {effectiveRouteSuggestions.length > 0 ? (
+              {effectiveRouteSuggestions.length > 0 || routeSuggestionQuery.trim().length >= 4 ? (
                 <div className="search-section">
                   <p className="section-eyebrow">
                     {activeRouteField === 'origin' ? 'Suggestions départ' : 'Suggestions arrivée'}
                   </p>
                   <div className="stack-list">
+                    {routeSuggestionQuery.trim().length >= 4 ? (
+                      <button className="result-row typed-query-row" onClick={() => void handleUseTypedRouteQuery()}>
+                        <strong>Utiliser “{routeSuggestionQuery.trim()}”</strong>
+                        <small>Garder l’adresse saisie telle quelle.</small>
+                      </button>
+                    ) : null}
                     {effectiveRouteSuggestions.map((place) => (
                       <button
                         key={`${place.id}:${place.address}`}
@@ -1369,6 +1518,21 @@ function App() {
                 </SearchSection>
               ) : null}
 
+              {searchSections.savedPlaces.length > 0 ? (
+                <SearchSection title="Adresses enregistrées">
+                  {searchSections.savedPlaces.map((place) => (
+                    <button
+                      key={`${place.id}:${place.address}`}
+                      className="result-row"
+                      onClick={() => void handleSelectSavedSearchPlace(place)}
+                    >
+                      <strong>{place.name}</strong>
+                      <small>{place.address}</small>
+                    </button>
+                  ))}
+                </SearchSection>
+              ) : null}
+
               {searchSections.places.length > 0 ? (
                 <SearchSection title="Adresses">
                   {searchSections.places.map((place) => (
@@ -1389,6 +1553,7 @@ function App() {
               deferredSearchQuery.trim() &&
               searchSections.routes.length === 0 &&
               searchSections.stations.length === 0 &&
+              searchSections.savedPlaces.length === 0 &&
               searchSections.places.length === 0 ? (
                 <p className="panel-copy">Aucun résultat.</p>
               ) : null}
@@ -1444,14 +1609,12 @@ function App() {
                   placeholder="Ton nom"
                 />
               </label>
-              <p className="panel-copy">
-                {session.email ?? 'Compte connecté'}{isSavingProfile ? ' • sauvegarde…' : ''}
-              </p>
+              <p className="panel-copy">Compte synchronisé{isSavingProfile ? ' • sauvegarde…' : ''}</p>
             </>
           ) : (
             <div className="auth-card">
               <p className="panel-copy">
-                Connecte-toi pour enregistrer domicile, travail, favoris et préférences.
+                Connecte-toi pour synchroniser tes adresses, tes favoris et tes préférences.
               </p>
               <div className="inline-actions">
                 <button className="secondary-button" onClick={() => openIdentity('login')}>
@@ -1465,39 +1628,38 @@ function App() {
           )}
         </section>
 
-        <section className="sidebar-section">
+        <section className="sidebar-section location-section">
           <div className="section-topline">
-            <p className="section-eyebrow">Localisation</p>
+            <p className="section-eyebrow">Ma position</p>
             <span className={`permission-pill ${effectiveLocationPreference}`}>
-              {locationPreferenceLabel(effectiveLocationPreference)}
+              {locationPreferenceLabel(effectiveLocationPreference, hasRequestedLocation)}
             </span>
           </div>
+          <p className="panel-copy">
+            Optionnelle. Sert surtout à partir d’où tu es ou à te recentrer sur la carte.
+          </p>
           <div className="inline-actions">
             <button className="secondary-button" onClick={() => void handleLocateFromSidebar()}>
               {isLocating ? 'Localisation…' : 'Utiliser ma position'}
-            </button>
-            <button
-              className="ghost-button"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            >
-              {theme === 'dark' ? 'Mode clair' : 'Mode sombre'}
             </button>
           </div>
           {locationHint ? <p className="panel-copy">{locationHint}</p> : null}
         </section>
 
         {session ? (
-          <section className="sidebar-section">
+          <section className="sidebar-section saved-places-section">
             <div className="section-topline">
               <p className="section-eyebrow">Adresses enregistrées</p>
               <span className="panel-copy">{profile.savedPlaces.length} adresses</span>
             </div>
+            <p className="panel-copy">Garde ici ton domicile, ton travail et jusqu’à 20 lieux nommés.</p>
 
             <div className="saved-place-grid">
               {homePlace ? (
                 <SavedPlaceCard
                   place={homePlace}
                   onRoute={() => void handleRouteToSavedPlace(homePlace)}
+                  onRename={() => void handleRenameSavedPlace(homePlace)}
                   onDelete={() => void handleDeleteSavedPlace(homePlace.id)}
                 />
               ) : (
@@ -1508,6 +1670,7 @@ function App() {
                 <SavedPlaceCard
                   place={workPlace}
                   onRoute={() => void handleRouteToSavedPlace(workPlace)}
+                  onRename={() => void handleRenameSavedPlace(workPlace)}
                   onDelete={() => void handleDeleteSavedPlace(workPlace.id)}
                 />
               ) : (
@@ -1522,6 +1685,7 @@ function App() {
                     key={place.id}
                     place={place}
                     onRoute={() => void handleRouteToSavedPlace(place)}
+                    onRename={() => void handleRenameSavedPlace(place)}
                     onDelete={() => void handleDeleteSavedPlace(place.id)}
                   />
                 ))}
@@ -1567,19 +1731,60 @@ function App() {
                 </button>
               ) : null}
               {selectedPlace && session ? (
-                <>
-                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('home')}>
-                    Enregistrer en domicile
-                  </button>
-                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('work')}>
-                    Enregistrer en travail
-                  </button>
-                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('saved')}>
-                    Enregistrer
-                  </button>
-                </>
+                <button className="ghost-button" onClick={() => handleStartSaveSelectedPlace()}>
+                  Enregistrer l’adresse
+                </button>
               ) : null}
             </div>
+
+            {selectedPlace && session && isSavePlaceOpen ? (
+              <div className="save-place-panel">
+                <label className="profile-field">
+                  <span>Nom</span>
+                  <input
+                    value={savePlaceName}
+                    onChange={(event) => setSavePlaceName(event.target.value)}
+                    placeholder="Ex. Salle de sport, Parents, Café"
+                  />
+                </label>
+                <div className="mode-switch">
+                  {(
+                    [
+                      ['saved', 'Adresse'],
+                      ['home', 'Domicile'],
+                      ['work', 'Travail'],
+                    ] as const
+                  ).map(([kind, label]) => (
+                    <button
+                      key={kind}
+                      className={`mode-pill ${savePlaceKind === kind ? 'active' : ''}`}
+                      onClick={() => {
+                        setSavePlaceKind(kind)
+                        setSavePlaceName(defaultSavedPlaceName(selectedPlace, kind))
+                        setSavePlaceError(null)
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {savePlaceError ? <p className="panel-copy">{savePlaceError}</p> : null}
+                <div className="inline-actions">
+                  <button className="secondary-button" onClick={() => void handleSaveSelectedPlace()}>
+                    Sauvegarder
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => {
+                      setIsSavePlaceOpen(false)
+                      setSavePlaceError(null)
+                    }}
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -1589,7 +1794,7 @@ function App() {
               <p className="section-eyebrow">Résultats</p>
               <span className="panel-copy">
                 {routeMode === 'transit'
-                  ? 'Bus, métro, REM'
+                  ? 'Transport en commun'
                   : routeMode === 'walking'
                     ? 'Marche'
                     : 'Vélo et BIXI'}
@@ -1653,7 +1858,7 @@ function App() {
           </section>
         ) : null}
 
-        <section className="sidebar-section">
+        <section className="sidebar-section favorites-section">
           <div className="section-topline">
             <p className="section-eyebrow">Favoris live</p>
             <span className="panel-copy">{pinnedRouteFavorites.length} épinglé(s)</span>
@@ -1680,7 +1885,7 @@ function App() {
           )}
         </section>
 
-        <section className="sidebar-section compact-controls">
+        <section className="sidebar-section compact-controls map-section">
           <div className="section-topline">
             <p className="section-eyebrow">Carte</p>
             <span className="panel-copy">{serviceStatusSummary}</span>
@@ -1702,6 +1907,21 @@ function App() {
                 {label}
               </button>
             ))}
+          </div>
+        </section>
+
+        <section className="sidebar-section appearance-section">
+          <div className="section-topline">
+            <p className="section-eyebrow">Affichage</p>
+            <span className="panel-copy">{theme === 'dark' ? 'Sombre' : 'Clair'}</span>
+          </div>
+          <div className="inline-actions">
+            <button
+              className="ghost-button"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            >
+              {theme === 'dark' ? 'Passer en clair' : 'Passer en sombre'}
+            </button>
           </div>
         </section>
 
@@ -1777,10 +1997,12 @@ function FavoriteRow({
 function SavedPlaceCard({
   place,
   onRoute,
+  onRename,
   onDelete,
 }: {
   place: SavedPlace
   onRoute: () => void
+  onRename: () => void
   onDelete: () => void
 }) {
   return (
@@ -1794,6 +2016,9 @@ function SavedPlaceCard({
         <button className="secondary-button" onClick={onRoute}>
           Y aller
         </button>
+        <button className="ghost-button" onClick={onRename}>
+          Renommer
+        </button>
         <button className="ghost-button" onClick={onDelete}>
           Retirer
         </button>
@@ -1805,10 +2030,12 @@ function SavedPlaceCard({
 function SavedPlaceListItem({
   place,
   onRoute,
+  onRename,
   onDelete,
 }: {
   place: SavedPlace
   onRoute: () => void
+  onRename: () => void
   onDelete: () => void
 }) {
   return (
@@ -1817,6 +2044,9 @@ function SavedPlaceListItem({
         <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
         <strong>{place.name}</strong>
         <small>{place.address}</small>
+      </button>
+      <button className="ghost-button" onClick={onRename}>
+        Renommer
       </button>
       <button className="ghost-button" onClick={onDelete}>
         Retirer
@@ -1879,16 +2109,15 @@ function toFavoriteItem(item: SearchItem | FavoriteItem): FavoriteItem {
   }
 }
 
-function toSavedPlace(place: ResolvedPlace, kind: SavedPlace['kind']): SavedPlace {
+function toSavedPlace(
+  place: ResolvedPlace,
+  kind: SavedPlace['kind'],
+  name = defaultSavedPlaceName(place, kind),
+): SavedPlace {
   return {
     ...place,
     kind,
-    name:
-      kind === 'home'
-        ? 'Domicile'
-        : kind === 'work'
-          ? 'Travail'
-          : place.label,
+    name,
   }
 }
 
@@ -2011,11 +2240,16 @@ function permissionStateToPreference(state: PermissionState): LocationPreference
   return 'unknown'
 }
 
-function locationPreferenceLabel(preference: LocationPreference) {
+function locationPreferenceLabel(
+  preference: LocationPreference,
+  hasRequestedLocation: boolean,
+) {
   if (preference === 'granted') return 'Autorisée'
-  if (preference === 'denied') return 'Refusée'
+  if (preference === 'denied') {
+    return hasRequestedLocation ? 'Bloquée' : 'À autoriser'
+  }
   if (preference === 'prompt-dismissed') return 'À confirmer'
-  return 'Non définie'
+  return 'Optionnelle'
 }
 
 function formatDistanceKm(distanceKm: number) {
@@ -2052,6 +2286,75 @@ function savedPlaceKindLabel(kind: SavedPlace['kind']) {
   }
 
   return 'Adresse'
+}
+
+function defaultSavedPlaceName(
+  place: ResolvedPlace,
+  kind: SavedPlace['kind'] = 'saved',
+) {
+  if (kind === 'home') {
+    return 'Domicile'
+  }
+
+  if (kind === 'work') {
+    return 'Travail'
+  }
+
+  const baseLabel = place.label === CURRENT_LOCATION_PLACEHOLDER
+    ? 'Adresse enregistrée'
+    : (place.label || place.address).split(',')[0] || place.label || place.address
+
+  return baseLabel.trim().slice(0, 60)
+}
+
+function searchSavedPlaces(savedPlaces: SavedPlace[], query: string) {
+  const trimmed = query.trim()
+  if (!trimmed) {
+    return []
+  }
+
+  return [...savedPlaces]
+    .map((place) => ({
+      place,
+      score: scoreSavedPlaceSearch(place, trimmed),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .map((entry) => entry.place)
+}
+
+function scoreSavedPlaceSearch(place: SavedPlace, query: string) {
+  const normalizedQuery = normalizeRouteText(query)
+  const haystack = normalizeRouteText(
+    `${place.name} ${place.label} ${place.address} ${savedPlaceKindLabel(place.kind)}`,
+  )
+
+  if (!normalizedQuery) {
+    return 0
+  }
+
+  let score = 0
+
+  if (normalizeRouteText(place.name) === normalizedQuery) {
+    score += 12
+  }
+
+  if (normalizeRouteText(place.label) === normalizedQuery) {
+    score += 8
+  }
+
+  if (haystack.includes(normalizedQuery)) {
+    score += 4
+  }
+
+  const queryTokens = normalizedQuery.split(/\s+/).filter(Boolean)
+  score += queryTokens.filter((token) => haystack.includes(token)).length
+
+  if (place.kind === 'home' || place.kind === 'work') {
+    score += 0.5
+  }
+
+  return score
 }
 
 export default App

@@ -14,13 +14,25 @@ import type {
 
 async function apiRequest<T>(input: string, init?: RequestInit) {
   const response = await fetch(input, init)
-  const payload = await response.json().catch(() => null)
+  const rawText = await response.text()
+  let payload: unknown = null
+
+  if (rawText) {
+    try {
+      payload = JSON.parse(rawText)
+    } catch {
+      payload = null
+    }
+  }
 
   if (!response.ok) {
     const message =
-      payload && typeof payload.error === 'string'
+      payload &&
+      typeof payload === 'object' &&
+      'error' in payload &&
+      typeof payload.error === 'string'
         ? payload.error
-        : 'La requête API a échoué.'
+        : rawText.trim() || `Erreur API (${response.status}).`
     throw new Error(message)
   }
 

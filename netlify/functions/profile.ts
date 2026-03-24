@@ -178,7 +178,7 @@ function sanitizeSavedPlaces(input: unknown[]) {
   return [
     ...home.values(),
     ...work.values(),
-    ...Array.from(saved.values()).slice(0, 8),
+    ...Array.from(saved.values()).slice(0, 20),
   ]
 }
 

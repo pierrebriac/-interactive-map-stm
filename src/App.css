@@ -18,10 +18,10 @@
 .status-toast,
 .workspace-sidebar {
   position: fixed;
-  z-index: 10;
 }
 
 .floating-search {
+  z-index: 22;
   top: 1.25rem;
   left: calc(var(--sidebar-width) + var(--chrome-gap));
   width: min(46rem, calc(100vw - var(--sidebar-width) - 2.5rem));
@@ -226,6 +226,10 @@
   background: color-mix(in srgb, var(--surface) 74%, var(--accent-soft));
 }
 
+.typed-query-row {
+  border-style: dashed;
+}
+
 .result-row strong,
 .favorite-main strong,
 .saved-list-main strong,
@@ -360,6 +364,7 @@
 }
 
 .status-toast {
+  z-index: 24;
   right: 1.25rem;
   bottom: 1.25rem;
   display: grid;
@@ -398,6 +403,7 @@
 }
 
 .workspace-sidebar {
+  z-index: 18;
   top: 0;
   left: 0;
   bottom: 0;
@@ -462,9 +468,7 @@
 }
 
 .account-section {
-  background:
-    radial-gradient(circle at top right, rgba(20, 104, 255, 0.12), transparent 45%),
-    var(--surface);
+  background: color-mix(in srgb, var(--surface) 92%, var(--surface-muted));
 }
 
 .profile-field {
@@ -508,6 +512,15 @@
 .saved-place-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.save-place-panel {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.82rem 0.88rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-muted) 86%, var(--surface));
 }
 
 .saved-list-item,
@@ -643,6 +656,42 @@
   font-size: 0.83rem;
 }
 
+.selection-section {
+  order: 1;
+}
+
+.itinerary-section {
+  order: 2;
+}
+
+.saved-places-section {
+  order: 3;
+}
+
+.favorites-section {
+  order: 4;
+}
+
+.map-section {
+  order: 5;
+}
+
+.appearance-section {
+  order: 6;
+}
+
+.location-section {
+  order: 7;
+}
+
+.account-section {
+  order: 8;
+}
+
+.alert-section {
+  order: 9;
+}
+
 .maplibregl-ctrl-top-right {
   top: 1.3rem !important;
   right: 1.3rem !important;
@@ -683,7 +732,7 @@
     transform: translateY(calc(100% - 4.2rem));
   }
 
-.workspace-sidebar.closed {
+  .workspace-sidebar.closed {
     transform: translateY(calc(100% - 4.2rem));
   }
 

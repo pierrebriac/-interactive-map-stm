@@ -53,7 +53,7 @@ export interface RoutedSurface {
   geometry: [number, number][]
   distanceKm: number
   durationMin: number
-  provider: 'openrouteservice' | 'estimated'
+  provider: 'openrouteservice' | 'osrm' | 'estimated'
   warnings: string[]
 }
 
@@ -94,6 +94,8 @@ export async function geocodePlaces(query: string, limit = 6) {
     }
   }
 
+  features = rankResolvedPlaces(trimmed, features)
+
   return {
     generatedAt: new Date().toISOString(),
     query: trimmed,
@@ -130,7 +132,7 @@ export async function resolvePlace(input: {
     throw new Error(`Adresse introuvable: ${input.query}`)
   }
 
-  return bestMatch
+  return mergePlaceWithQuery(bestMatch, input.query)
 }
 
 export async function routeSurfacePath(
@@ -139,56 +141,73 @@ export async function routeSurfacePath(
   profile: 'walking' | 'cycling',
 ) {
   const orsKey = process.env.ORS_API_KEY
-  if (!orsKey) {
-    return estimateSurfacePath(from, to, profile)
-  }
+  const warnings: string[] = []
 
-  const profileId = profile === 'walking' ? 'foot-walking' : 'cycling-regular'
-  const response = await fetch(
-    `https://api.openrouteservice.org/v2/directions/${profileId}/geojson`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: orsKey,
-        'content-type': 'application/json',
+  if (orsKey) {
+    const profileId = profile === 'walking' ? 'foot-walking' : 'cycling-regular'
+    const response = await fetch(
+      `https://api.openrouteservice.org/v2/directions/${profileId}/geojson`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: orsKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          coordinates: [
+            [from.lon, from.lat],
+            [to.lon, to.lat],
+          ],
+          instructions: false,
+        }),
       },
-      body: JSON.stringify({
-        coordinates: [
-          [from.lon, from.lat],
-          [to.lon, to.lat],
-        ],
-        instructions: false,
-      }),
-    },
-  )
-
-  if (!response.ok) {
-    const fallback = estimateSurfacePath(from, to, profile)
-    fallback.warnings.push(
-      `OpenRouteService returned ${response.status}; fallback estimation used.`,
     )
-    return fallback
+
+    if (response.ok) {
+      const payload = (await response.json()) as OrsFeatureCollection
+      const feature = payload.features?.[0]
+      const coordinates = feature?.geometry?.coordinates
+      const distanceMeters = feature?.properties?.summary?.distance
+      const durationSeconds = feature?.properties?.summary?.duration
+
+      if (
+        coordinates &&
+        typeof distanceMeters === 'number' &&
+        typeof durationSeconds === 'number'
+      ) {
+        return {
+          geometry: coordinates,
+          distanceKm: distanceMeters / 1000,
+          durationMin: durationSeconds / 60,
+          provider: 'openrouteservice',
+          warnings,
+        } satisfies RoutedSurface
+      }
+
+      warnings.push('OpenRouteService a répondu de façon incomplète.')
+    } else {
+      warnings.push(`OpenRouteService a répondu ${response.status}.`)
+    }
   }
 
-  const payload = (await response.json()) as OrsFeatureCollection
-  const feature = payload.features?.[0]
-  const coordinates = feature?.geometry?.coordinates
-  const distanceMeters = feature?.properties?.summary?.distance
-  const durationSeconds = feature?.properties?.summary?.duration
+  const osrmRoute = await routeSurfaceWithOsrm(from, to, profile).catch((error) => {
+    warnings.push(
+      error instanceof Error ? error.message : 'Le routage OSRM a échoué.',
+    )
+    return null
+  })
 
-  if (!coordinates || typeof distanceMeters !== 'number' || typeof durationSeconds !== 'number') {
-    const fallback = estimateSurfacePath(from, to, profile)
-    fallback.warnings.push('OpenRouteService response incomplete; fallback estimation used.')
-    return fallback
+  if (osrmRoute) {
+    return {
+      ...osrmRoute,
+      warnings,
+    }
   }
 
-  return {
-    geometry: coordinates,
-    distanceKm: distanceMeters / 1000,
-    durationMin: durationSeconds / 60,
-    provider: 'openrouteservice',
-    warnings: [] as string[],
-  } satisfies RoutedSurface
+  const fallback = estimateSurfacePath(from, to, profile)
+  fallback.warnings.push(...warnings)
+  fallback.warnings.push('Le tracé a été estimé faute de moteur de routage disponible.')
+  return fallback
 }
 
 export function estimateSurfacePath(
@@ -233,7 +252,7 @@ async function geocodeWithMapTiler(query: string, limit: number) {
   url.searchParams.set('bbox', MONTREAL_BBOX.join(','))
   url.searchParams.set('proximity', MONTREAL_PROXIMITY.join(','))
   url.searchParams.set('country', 'ca')
-  url.searchParams.set('autocomplete', 'true')
+  url.searchParams.set('autocomplete', containsStreetNumber(query) ? 'false' : 'true')
 
   const response = await fetch(url)
   if (!response.ok) {
@@ -269,6 +288,7 @@ async function geocodeWithMapTiler(query: string, limit: number) {
 async function geocodeWithNominatim(query: string, limit: number) {
   const url = new URL('https://nominatim.openstreetmap.org/search')
   url.searchParams.set('format', 'jsonv2')
+  url.searchParams.set('addressdetails', '1')
   url.searchParams.set('limit', String(Math.min(Math.max(limit, 1), 10)))
   url.searchParams.set('countrycodes', 'ca')
   url.searchParams.set('viewbox', `${MONTREAL_BBOX[0]},${MONTREAL_BBOX[3]},${MONTREAL_BBOX[2]},${MONTREAL_BBOX[1]}`)
@@ -323,6 +343,10 @@ function shouldUseNominatimFallback(query: string, features: ResolvedPlace[]) {
   }
 
   const top = features[0]
+  if (containsStreetNumber(query) && top.placeType === 'address') {
+    return false
+  }
+
   const normalizedQuery = normalizeLooseText(query)
   const normalizedMatch = normalizeLooseText(`${top.label} ${top.address}`)
   const broadPlace =
@@ -348,4 +372,109 @@ function normalizeLooseText(value: string) {
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
     .trim()
+}
+
+async function routeSurfaceWithOsrm(
+  from: GeoPoint,
+  to: GeoPoint,
+  profile: 'walking' | 'cycling',
+) {
+  const profileId = profile === 'walking' ? 'foot' : 'bike'
+  const url = new URL(
+    `https://router.project-osrm.org/route/v1/${profileId}/${from.lon},${from.lat};${to.lon},${to.lat}`,
+  )
+  url.searchParams.set('overview', 'full')
+  url.searchParams.set('geometries', 'geojson')
+
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`OSRM a répondu ${response.status}.`)
+  }
+
+  const payload = (await response.json()) as {
+    routes?: Array<{
+      distance?: number
+      duration?: number
+      geometry?: {
+        coordinates?: [number, number][]
+      }
+    }>
+  }
+
+  const route = payload.routes?.[0]
+  const coordinates = route?.geometry?.coordinates
+  const distanceMeters = route?.distance
+  const durationSeconds = route?.duration
+
+  if (!coordinates || typeof distanceMeters !== 'number' || typeof durationSeconds !== 'number') {
+    throw new Error('OSRM a répondu sans géométrie exploitable.')
+  }
+
+  return {
+    geometry: coordinates,
+    distanceKm: distanceMeters / 1000,
+    durationMin: durationSeconds / 60,
+    provider: 'osrm',
+    warnings: [] as string[],
+  } satisfies RoutedSurface
+}
+
+function rankResolvedPlaces(query: string, features: ResolvedPlace[]) {
+  return [...features].sort(
+    (left, right) => scoreResolvedPlace(query, right) - scoreResolvedPlace(query, left),
+  )
+}
+
+function scoreResolvedPlace(query: string, place: ResolvedPlace) {
+  let score = place.relevance
+  const normalizedQuery = normalizeLooseText(query)
+  const normalizedAddress = normalizeLooseText(`${place.label} ${place.address}`)
+  const queryTokens = normalizedQuery.split(/\s+/).filter(Boolean)
+  const houseNumber = extractStreetNumber(query)
+
+  if (place.placeType === 'address') {
+    score += 2
+  }
+
+  if (houseNumber && normalizedAddress.includes(houseNumber)) {
+    score += 4
+  }
+
+  const matchedTokens = queryTokens.filter((token) => normalizedAddress.includes(token)).length
+  score += matchedTokens * 0.2
+
+  return score
+}
+
+function mergePlaceWithQuery(place: ResolvedPlace, query: string) {
+  const trimmed = query.trim()
+  if (!trimmed) {
+    return place
+  }
+
+  const label = trimmed.split(',')[0]?.trim() || trimmed
+  const houseNumber = extractStreetNumber(trimmed)
+  const normalizedMatch = normalizeLooseText(`${place.label} ${place.address}`)
+
+  if (houseNumber && !normalizedMatch.includes(houseNumber)) {
+    return {
+      ...place,
+      label,
+      address: trimmed,
+    } satisfies ResolvedPlace
+  }
+
+  return {
+    ...place,
+    label,
+    address: trimmed,
+  } satisfies ResolvedPlace
+}
+
+function containsStreetNumber(value: string) {
+  return /\b\d{1,6}\b/.test(value)
+}
+
+function extractStreetNumber(value: string) {
+  return value.match(/\b\d{1,6}\b/u)?.[0] ?? null
 }
