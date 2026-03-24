@@ -49,9 +49,9 @@ L’app sera servie sur [http://localhost:8888](http://localhost:8888).
 
 ### Bus STM temps réel
 - `STM_BUS_VEHICLE_POSITIONS_URL`
-  URL GTFS-RT des positions de véhicules STM.
+  URL GTFS-RT des positions de véhicules STM. Valeur testée : `https://api.stm.info/pub/od/gtfs-rt/ic/v2/vehiclePositions`
 - `STM_API_KEY`
-  Clé STM si requise.
+  Clé STM `API Key / Client ID`.
 - `STM_API_KEY_HEADER`
   Header utilisé pour la clé si la STM attend un header. Défaut : `apikey`.
 - `STM_API_KEY_QUERY_PARAM`
