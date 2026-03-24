@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "dev:netlify": "npm run prepare:data && npx netlify dev",
-    "prepare:data": "tsx scripts/prepare-network-model.ts",
+    "prepare:data": "tsx scripts/prepare-network-model.ts --if-missing",
+    "prepare:data:refresh": "tsx scripts/prepare-network-model.ts --refresh",
     "build": "npm run prepare:data && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",

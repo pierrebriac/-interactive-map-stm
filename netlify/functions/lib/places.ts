@@ -24,6 +24,17 @@ interface MapTilerGeocodeResponse {
   features?: MapTilerGeocodeFeature[]
 }
 
+interface NominatimResult {
+  place_id?: number
+  lat?: string
+  lon?: string
+  name?: string
+  display_name?: string
+  category?: string
+  type?: string
+  importance?: number
+}
+
 interface OrsFeatureCollection {
   features?: Array<{
     geometry?: {
@@ -57,53 +68,37 @@ export async function geocodePlaces(query: string, limit = 6) {
     } satisfies GeocodeResponse
   }
 
-  const mapTilerKey = getMapTilerKey()
-  const url = new URL(
-    `https://api.maptiler.com/geocoding/${encodeURIComponent(trimmed)}.json`,
-  )
-  url.searchParams.set('key', mapTilerKey)
-  url.searchParams.set('language', 'fr')
-  url.searchParams.set('limit', String(Math.min(Math.max(limit, 1), 10)))
-  url.searchParams.set('bbox', MONTREAL_BBOX.join(','))
-  url.searchParams.set('proximity', MONTREAL_PROXIMITY.join(','))
-  url.searchParams.set('country', 'ca')
-  url.searchParams.set('autocomplete', 'true')
+  const warnings: string[] = []
 
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`MapTiler geocoding returned ${response.status}`)
-  }
-
-  const payload = (await response.json()) as MapTilerGeocodeResponse
-  const features = (payload.features ?? [])
-    .filter(
-      (feature): feature is MapTilerGeocodeFeature & {
-        id: string
-        place_name: string
-        center: [number, number]
-      } =>
-        typeof feature.id === 'string' &&
-        typeof feature.place_name === 'string' &&
-        Array.isArray(feature.center) &&
-        feature.center.length === 2 &&
-        typeof feature.center[0] === 'number' &&
-        typeof feature.center[1] === 'number',
+  let features = await geocodeWithMapTiler(trimmed, limit).catch((error) => {
+    warnings.push(
+      error instanceof Error
+        ? `MapTiler indisponible: ${error.message}`
+        : 'MapTiler indisponible.',
     )
-    .map<ResolvedPlace>((feature) => ({
-      id: feature.id,
-      label: feature.text || feature.place_name,
-      address: feature.place_name,
-      placeType: feature.place_type?.[0] || 'place',
-      relevance: feature.relevance ?? 0,
-      lon: feature.center[0],
-      lat: feature.center[1],
-    }))
+    return [] as ResolvedPlace[]
+  })
+
+  if (shouldUseNominatimFallback(trimmed, features)) {
+    const fallbackFeatures = await geocodeWithNominatim(trimmed, limit).catch((error) => {
+      warnings.push(
+        error instanceof Error
+          ? `Nominatim indisponible: ${error.message}`
+          : 'Nominatim indisponible.',
+      )
+      return [] as ResolvedPlace[]
+    })
+
+    if (fallbackFeatures.length > 0) {
+      features = fallbackFeatures
+    }
+  }
 
   return {
     generatedAt: new Date().toISOString(),
     query: trimmed,
     features,
-    warnings: [],
+    warnings,
   } satisfies GeocodeResponse
 }
 
@@ -225,4 +220,132 @@ function getMapTilerKey() {
   }
 
   return key
+}
+
+async function geocodeWithMapTiler(query: string, limit: number) {
+  const mapTilerKey = getMapTilerKey()
+  const url = new URL(
+    `https://api.maptiler.com/geocoding/${encodeURIComponent(query)}.json`,
+  )
+  url.searchParams.set('key', mapTilerKey)
+  url.searchParams.set('language', 'fr')
+  url.searchParams.set('limit', String(Math.min(Math.max(limit, 1), 10)))
+  url.searchParams.set('bbox', MONTREAL_BBOX.join(','))
+  url.searchParams.set('proximity', MONTREAL_PROXIMITY.join(','))
+  url.searchParams.set('country', 'ca')
+  url.searchParams.set('autocomplete', 'true')
+
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`MapTiler geocoding returned ${response.status}`)
+  }
+
+  const payload = (await response.json()) as MapTilerGeocodeResponse
+  return (payload.features ?? [])
+    .filter(
+      (feature): feature is MapTilerGeocodeFeature & {
+        id: string
+        place_name: string
+        center: [number, number]
+      } =>
+        typeof feature.id === 'string' &&
+        typeof feature.place_name === 'string' &&
+        Array.isArray(feature.center) &&
+        feature.center.length === 2 &&
+        typeof feature.center[0] === 'number' &&
+        typeof feature.center[1] === 'number',
+    )
+    .map<ResolvedPlace>((feature) => ({
+      id: feature.id,
+      label: feature.text || feature.place_name,
+      address: feature.place_name,
+      placeType: feature.place_type?.[0] || 'place',
+      relevance: feature.relevance ?? 0,
+      lon: feature.center[0],
+      lat: feature.center[1],
+    }))
+}
+
+async function geocodeWithNominatim(query: string, limit: number) {
+  const url = new URL('https://nominatim.openstreetmap.org/search')
+  url.searchParams.set('format', 'jsonv2')
+  url.searchParams.set('limit', String(Math.min(Math.max(limit, 1), 10)))
+  url.searchParams.set('countrycodes', 'ca')
+  url.searchParams.set('viewbox', `${MONTREAL_BBOX[0]},${MONTREAL_BBOX[3]},${MONTREAL_BBOX[2]},${MONTREAL_BBOX[1]}`)
+  url.searchParams.set('bounded', '1')
+  url.searchParams.set('q', query)
+
+  const response = await fetch(url, {
+    headers: {
+      'accept-language': 'fr',
+      'user-agent': 'TransitAtlas/1.0',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`Nominatim returned ${response.status}`)
+  }
+
+  const payload = (await response.json()) as NominatimResult[]
+
+  return payload
+    .filter(
+      (entry): entry is NominatimResult & {
+        place_id: number
+        lat: string
+        lon: string
+        display_name: string
+      } =>
+        typeof entry.place_id === 'number' &&
+        typeof entry.display_name === 'string' &&
+        typeof entry.lat === 'string' &&
+        typeof entry.lon === 'string',
+    )
+    .map<ResolvedPlace>((entry) => ({
+      id: `nominatim:${entry.place_id}`,
+      label: entry.name || entry.display_name.split(',')[0] || entry.display_name,
+      address: entry.display_name,
+      placeType: entry.type || entry.category || 'place',
+      relevance: entry.importance ?? 0.5,
+      lon: Number.parseFloat(entry.lon),
+      lat: Number.parseFloat(entry.lat),
+    }))
+    .filter(
+      (entry) =>
+        Number.isFinite(entry.lon) &&
+        Number.isFinite(entry.lat),
+    )
+}
+
+function shouldUseNominatimFallback(query: string, features: ResolvedPlace[]) {
+  if (features.length === 0) {
+    return true
+  }
+
+  const top = features[0]
+  const normalizedQuery = normalizeLooseText(query)
+  const normalizedMatch = normalizeLooseText(`${top.label} ${top.address}`)
+  const broadPlace =
+    top.placeType === 'municipality' ||
+    top.placeType === 'county' ||
+    top.placeType === 'subregion' ||
+    top.placeType === 'country'
+
+  if (broadPlace && top.relevance < 0.8) {
+    return true
+  }
+
+  if (normalizedQuery.length >= 4 && !normalizedMatch.includes(normalizedQuery)) {
+    return true
+  }
+
+  return false
+}
+
+function normalizeLooseText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .trim()
 }

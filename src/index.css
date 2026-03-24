@@ -52,7 +52,7 @@
   --bg-elevated: rgba(21, 26, 34, 0.94);
   --bg-strong: rgba(9, 11, 16, 0.94);
   --surface: rgba(18, 23, 31, 0.88);
-  --surface-muted: rgba(22, 28, 37, 0.74);
+  --surface-muted: rgba(28, 35, 46, 0.9);
   --surface-solid: #11161d;
   --surface-dark: rgba(8, 10, 14, 0.8);
   --text: #f3efe7;
@@ -61,7 +61,8 @@
   --text-inverse: #f7f5f0;
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --accent-soft: rgba(82, 140, 255, 0.18);
+  --accent-soft: rgba(82, 140, 255, 0.26);
+  --accent-strong: #edf3ff;
   --shadow-soft: 0 18px 40px rgba(0, 0, 0, 0.32);
   --shadow-strong: 0 28px 68px rgba(0, 0, 0, 0.42);
 }

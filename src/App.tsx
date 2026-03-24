@@ -462,7 +462,7 @@ function App() {
   const effectiveRouteSuggestions = useMemo(() => {
     const deduped = new Map<string, ResolvedPlace>()
 
-    for (const suggestion of [...routeStationSuggestions, ...routeSuggestions]) {
+    for (const suggestion of [...routeSuggestions, ...routeStationSuggestions]) {
       deduped.set(`${suggestion.id}:${suggestion.address}`, suggestion)
     }
 
@@ -701,7 +701,7 @@ function App() {
       if (destination) {
         const place = toResolvedPlace(destination)
         setRouteDestination(place)
-        setRouteDestinationQuery(place.address)
+        setRouteDestinationQuery(routeInputDisplay(place))
         setActiveRouteField('origin')
       } else {
         setActiveRouteField(routeDestination ? 'origin' : 'destination')
@@ -951,6 +951,26 @@ function App() {
     setActiveRouteField('destination')
   }
 
+  const handleLocateFromSidebar = async () => {
+    const place = currentLocation ?? (await requestCurrentLocation())
+    if (!place) {
+      return
+    }
+
+    setSelectedPlace(place)
+    setSelectedItem(null)
+    setSearchQuery(CURRENT_LOCATION_PLACEHOLDER)
+    if (surfaceMode !== 'route') {
+      setSurfaceMode('explore')
+    }
+
+    if (surfaceMode === 'route' && !routeOrigin) {
+      setRouteOrigin(place)
+      setRouteOriginQuery(CURRENT_LOCATION_PLACEHOLDER)
+      setActiveRouteField('destination')
+    }
+  }
+
   const handleRouteToSavedPlace = async (place: SavedPlace) => {
     handleOpenRoute(place)
     const location = currentLocation ?? (await requestCurrentLocation())
@@ -963,15 +983,17 @@ function App() {
   }
 
   const handleRoutePick = (field: RouteField, place: ResolvedPlace) => {
+    const displayValue = routeInputDisplay(place)
+
     if (field === 'origin') {
       setRouteOrigin(place)
-      setRouteOriginQuery(place.address)
+      setRouteOriginQuery(displayValue)
       setActiveRouteField('destination')
       return
     }
 
     setRouteDestination(place)
-    setRouteDestinationQuery(place.address)
+    setRouteDestinationQuery(displayValue)
     setActiveRouteField('origin')
   }
 
@@ -980,6 +1002,99 @@ function App() {
     setRouteDestination(routeOrigin)
     setRouteOriginQuery(routeDestinationQuery)
     setRouteDestinationQuery(routeOriginQuery)
+  }
+
+  const handleResolveRouteInputs = async () => {
+    setPlanError(null)
+
+    const resolvedOrigin = routeOrigin ?? (await resolveRouteField('origin'))
+    const resolvedDestination =
+      routeDestination ?? (await resolveRouteField('destination'))
+
+    if (!resolvedOrigin || !resolvedDestination) {
+      setPlanError('Entre un départ et une arrivée valides dans Montréal.')
+      return
+    }
+  }
+
+  async function resolveRouteField(field: RouteField) {
+    const query =
+      field === 'origin' ? routeOriginQuery.trim() : routeDestinationQuery.trim()
+    if (!query) {
+      return null
+    }
+
+    if (query === CURRENT_LOCATION_PLACEHOLDER) {
+      if (currentLocation) {
+        setResolvedRouteField(field, currentLocation, CURRENT_LOCATION_PLACEHOLDER)
+        return currentLocation
+      }
+
+      const place = await requestCurrentLocation()
+      if (place) {
+        setResolvedRouteField(field, place, CURRENT_LOCATION_PLACEHOLDER)
+      }
+      return place
+    }
+
+    const matchingSavedPlace = profile.savedPlaces.find((place) =>
+      [place.name, place.label, place.address].some(
+        (candidate) => normalizeRouteText(candidate) === normalizeRouteText(query),
+      ),
+    )
+
+    if (matchingSavedPlace) {
+      const resolved = toResolvedPlace(matchingSavedPlace)
+      setResolvedRouteField(field, resolved, matchingSavedPlace.address)
+      return resolved
+    }
+
+    try {
+      const geocoded = await fetchGeocode(query, 1)
+      const bestPlace = geocoded.features[0]
+      if (bestPlace) {
+        setResolvedRouteField(field, bestPlace, bestPlace.address)
+        return bestPlace
+      }
+    } catch (error) {
+      setAppError(
+        error instanceof Error
+          ? error.message
+          : 'Impossible de géocoder cette adresse.',
+      )
+    }
+
+    const stationFallback = bootstrap
+      ? searchItems(bootstrap.searchIndex, query, {
+          limit: 1,
+          types: ['station'],
+        })[0]
+      : null
+
+    if (stationFallback) {
+      const resolved = toResolvedPlace(stationFallback)
+      setResolvedRouteField(field, resolved, resolved.label)
+      return resolved
+    }
+
+    return null
+  }
+
+  function setResolvedRouteField(
+    field: RouteField,
+    place: ResolvedPlace,
+    displayValue = routeInputDisplay(place),
+  ) {
+    if (field === 'origin') {
+      setRouteOrigin(place)
+      setRouteOriginQuery(displayValue)
+      setActiveRouteField('destination')
+      return
+    }
+
+    setRouteDestination(place)
+    setRouteDestinationQuery(displayValue)
+    setActiveRouteField('origin')
   }
 
   const handleSelectItinerary = (itineraryId: string) => {
@@ -1012,11 +1127,11 @@ function App() {
 
         <div className={`floating-search ${searchPopoverVisible ? 'expanded' : ''}`}>
           <div className="omnibox-row">
-            {isMobileViewport ? (
+            {isMobileViewport || !isSidebarOpen ? (
               <button
                 className="chrome-button icon"
                 onClick={() => setIsSidebarOpen((open) => !open)}
-                aria-label="Ouvrir le panneau"
+                aria-label={isSidebarOpen ? 'Fermer le panneau' : 'Ouvrir le panneau'}
               >
                 {isSidebarOpen ? '✕' : '☰'}
               </button>
@@ -1096,6 +1211,12 @@ function App() {
                   <input
                     value={routeOriginQuery}
                     onFocus={() => setActiveRouteField('origin')}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        void handleResolveRouteInputs()
+                      }
+                    }}
                     onChange={(event) => {
                       setRouteOriginQuery(event.target.value)
                       setRouteOrigin(null)
@@ -1112,6 +1233,12 @@ function App() {
                   <input
                     value={routeDestinationQuery}
                     onFocus={() => setActiveRouteField('destination')}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        void handleResolveRouteInputs()
+                      }
+                    }}
                     onChange={(event) => {
                       setRouteDestinationQuery(event.target.value)
                       setRouteDestination(null)
@@ -1163,6 +1290,27 @@ function App() {
                     {label}
                   </button>
                 ))}
+              </div>
+
+              <div className="inline-actions">
+                <button className="primary-button" onClick={() => void handleResolveRouteInputs()}>
+                  Calculer le trajet
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    setRouteOrigin(null)
+                    setRouteDestination(null)
+                    setRouteOriginQuery('')
+                    setRouteDestinationQuery('')
+                    setPlanError(null)
+                    setPlanWarnings([])
+                    setPlanItineraries([])
+                    setSelectedItineraryId(null)
+                  }}
+                >
+                  Effacer
+                </button>
               </div>
 
               {effectiveRouteSuggestions.length > 0 ? (
@@ -1269,7 +1417,7 @@ function App() {
             <button
               className="chrome-button icon subtle"
               onClick={() => setIsSidebarOpen((open) => !open)}
-              aria-label="Replier le panneau"
+              aria-label={isSidebarOpen ? 'Replier le panneau' : 'Déplier le panneau'}
             >
               {isSidebarOpen ? '←' : '→'}
             </button>
@@ -1325,7 +1473,7 @@ function App() {
             </span>
           </div>
           <div className="inline-actions">
-            <button className="secondary-button" onClick={() => void requestCurrentLocation()}>
+            <button className="secondary-button" onClick={() => void handleLocateFromSidebar()}>
               {isLocating ? 'Localisation…' : 'Utiliser ma position'}
             </button>
             <button
@@ -1341,7 +1489,7 @@ function App() {
         {session ? (
           <section className="sidebar-section">
             <div className="section-topline">
-              <p className="section-eyebrow">Raccourcis</p>
+              <p className="section-eyebrow">Adresses enregistrées</p>
               <span className="panel-copy">{profile.savedPlaces.length} adresses</span>
             </div>
 
@@ -1378,7 +1526,11 @@ function App() {
                   />
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <p className="panel-copy">
+                Sélectionne une adresse dans la recherche, puis enregistre-la ici.
+              </p>
+            )}
           </section>
         ) : null}
 
@@ -1634,6 +1786,7 @@ function SavedPlaceCard({
   return (
     <div className="saved-card">
       <div>
+        <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
         <strong>{place.name}</strong>
         <small>{place.address}</small>
       </div>
@@ -1661,6 +1814,7 @@ function SavedPlaceListItem({
   return (
     <div className="saved-list-item">
       <button className="saved-list-main" onClick={onRoute}>
+        <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
         <strong>{place.name}</strong>
         <small>{place.address}</small>
       </button>
@@ -1674,6 +1828,7 @@ function SavedPlaceListItem({
 function PlaceholderCard({ title, body }: { title: string; body: string }) {
   return (
     <div className="saved-card placeholder">
+      <span className="saved-place-kind">{title}</span>
       <strong>{title}</strong>
       <small>{body}</small>
     </div>
@@ -1761,6 +1916,22 @@ function toResolvedPlace(
     lat: place.lat,
     lon: place.lon,
   }
+}
+
+function routeInputDisplay(place: ResolvedPlace) {
+  if (place.label === CURRENT_LOCATION_PLACEHOLDER) {
+    return CURRENT_LOCATION_PLACEHOLDER
+  }
+
+  if (place.placeType === 'station' || place.placeType === 'route') {
+    return place.label
+  }
+
+  if (place.address === 'Station de métro' || place.address === 'Station du REM') {
+    return place.label
+  }
+
+  return place.address || place.label
 }
 
 function buildRouteCameraRequest(
@@ -1859,8 +2030,28 @@ function uniqueTransportModes(values: TransportMode[]) {
   return Array.from(new Set(values))
 }
 
+function normalizeRouteText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .trim()
+}
+
 function createRequestId(prefix: string) {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+}
+
+function savedPlaceKindLabel(kind: SavedPlace['kind']) {
+  if (kind === 'home') {
+    return 'Domicile'
+  }
+
+  if (kind === 'work') {
+    return 'Travail'
+  }
+
+  return 'Adresse'
 }
 
 export default App

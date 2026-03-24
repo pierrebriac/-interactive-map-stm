@@ -137,6 +137,7 @@
   justify-content: center;
   min-height: 2.55rem;
   padding: 0.65rem 0.9rem;
+  border: 1px solid transparent;
   border-radius: 999px;
   background: var(--surface);
   color: var(--text);
@@ -150,8 +151,9 @@
 }
 
 .chrome-button.subtle {
+  border-color: var(--border);
   background: var(--surface-muted);
-  color: var(--text-secondary);
+  color: var(--text);
 }
 
 .chrome-button.active {
@@ -295,6 +297,7 @@
   justify-content: center;
   min-height: 2rem;
   padding: 0.45rem 0.72rem;
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 0.78rem;
   font-weight: 700;
@@ -304,7 +307,7 @@
 .mode-pill,
 .pin-toggle {
   background: var(--surface-muted);
-  color: var(--text-secondary);
+  color: var(--text);
 }
 
 .mode-pill.active,
@@ -326,13 +329,15 @@
 }
 
 .secondary-button {
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   background: var(--accent-soft);
-  color: var(--accent-strong);
+  color: var(--text);
 }
 
 .ghost-button {
-  background: var(--surface-muted);
-  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-muted) 82%, var(--surface-solid));
+  color: var(--text);
 }
 
 .primary-button {
@@ -410,7 +415,7 @@
 }
 
 .workspace-sidebar.closed {
-  transform: translateX(calc(-100% + 4rem));
+  transform: translateX(calc(-100% - 1rem));
 }
 
 .workspace-sidebar.open {
@@ -485,6 +490,21 @@
   gap: 0.55rem;
 }
 
+.saved-place-kind {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-bottom: 0.32rem;
+  padding: 0.18rem 0.48rem;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
 .saved-place-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -518,7 +538,7 @@
 
 .permission-pill {
   background: var(--surface-muted);
-  color: var(--text-secondary);
+  color: var(--text);
 }
 
 .permission-pill.granted {
@@ -663,7 +683,7 @@
     transform: translateY(calc(100% - 4.2rem));
   }
 
-  .workspace-sidebar.closed {
+.workspace-sidebar.closed {
     transform: translateY(calc(100% - 4.2rem));
   }
 
