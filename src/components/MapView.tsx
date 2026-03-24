@@ -51,6 +51,7 @@ export function MapView({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
   const fittedInitialBoundsRef = useRef(false)
+  const userHasInteractedRef = useRef(false)
   const activeStyleRef = useRef<MapStyle>(mapStyle)
   const bootstrapRef = useRef<BootstrapResponse | null>(bootstrap)
   const onSelectItemRef = useRef(onSelectItem)
@@ -133,6 +134,12 @@ export function MapView({
     const clearPointer = () => {
       map.getCanvas().style.cursor = ''
     }
+
+    map.on('moveend', (e) => {
+      if (e.originalEvent) {
+        userHasInteractedRef.current = true
+      }
+    })
 
     map.on('load', () => {
       ensureLayers(map)
@@ -220,6 +227,7 @@ export function MapView({
       )
       const bounds = computeBounds(selectedShapes.flatMap((shape) => shape.coordinates))
       map.fitBounds(bounds, { padding: 96, duration: 750 })
+      userHasInteractedRef.current = false
       return
     }
 
@@ -229,10 +237,11 @@ export function MapView({
         zoom: 13.6,
         duration: 700,
       })
+      userHasInteractedRef.current = false
       return
     }
 
-    if (favoritesFocus.length > 0) {
+    if (favoritesFocus.length > 0 && !userHasInteractedRef.current) {
       const bounds = computeBounds(
         favoritesFocus.map((favorite) => [favorite.lon, favorite.lat]),
       )

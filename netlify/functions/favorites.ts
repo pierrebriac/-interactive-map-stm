@@ -72,24 +72,35 @@ async function writeFavorites(userId: string, favorites: FavoriteItem[]) {
 }
 
 function sanitizeFavorites(input: unknown[]) {
-  return input
-    .filter((value): value is FavoriteItem => {
-      if (!value || typeof value !== 'object') {
-        return false
-      }
+  const deduped = new Map<string, FavoriteItem>()
 
-      const favorite = value as FavoriteItem
-      return (
-        (favorite.type === 'route' || favorite.type === 'station') &&
-        (favorite.mode === 'bus' ||
-          favorite.mode === 'metro' ||
-          favorite.mode === 'rem') &&
-        typeof favorite.id === 'string' &&
-        typeof favorite.label === 'string' &&
-        typeof favorite.subtitle === 'string' &&
-        typeof favorite.lat === 'number' &&
-        typeof favorite.lon === 'number'
-      )
+  for (const value of input) {
+    if (!value || typeof value !== 'object') {
+      continue
+    }
+
+    const favorite = value as FavoriteItem
+    const valid =
+      (favorite.type === 'route' || favorite.type === 'station') &&
+      (favorite.mode === 'bus' ||
+        favorite.mode === 'metro' ||
+        favorite.mode === 'rem') &&
+      typeof favorite.id === 'string' &&
+      typeof favorite.label === 'string' &&
+      typeof favorite.subtitle === 'string' &&
+      typeof favorite.lat === 'number' &&
+      typeof favorite.lon === 'number'
+
+    if (!valid) {
+      continue
+    }
+
+    deduped.set(`${favorite.type}:${favorite.id}`, favorite)
+  }
+
+  return Array.from(deduped.values())
+    .filter((value): value is FavoriteItem => {
+      return Boolean(value)
     })
-    .slice(0, 24)
+    .slice(0, 64)
 }

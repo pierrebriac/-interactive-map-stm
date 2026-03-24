@@ -10,7 +10,7 @@ import type {
   TransportMode,
 } from '../shared/types.ts'
 
-export type PlannerMode = 'walking' | 'transit'
+export type PlannerMode = 'walking' | 'transit' | 'bixi'
 
 export interface PlannerStation {
   id: string
@@ -98,6 +98,10 @@ export function buildPlanner(
 
   if (mode === 'walking') {
     return buildWalkingPlan(origin, destination)
+  }
+
+  if (mode === 'bixi') {
+    return null
   }
 
   return buildTransitPlan(bootstrap, origin, destination)

@@ -274,3 +274,37 @@ export function projectPointToPolyline(
     coordinate: bestCoordinate,
   }
 }
+
+export function slicePolylineAlongDistances(
+  coordinates: [number, number][],
+  distances: number[],
+  startDistanceKm: number,
+  endDistanceKm: number,
+) {
+  if (coordinates.length === 0) {
+    return [] as [number, number][]
+  }
+
+  const start = Math.max(0, Math.min(startDistanceKm, endDistanceKm))
+  const end = Math.max(start, Math.max(startDistanceKm, endDistanceKm))
+
+  if (start === end) {
+    return [interpolateAlongPolyline(coordinates, distances, start)]
+  }
+
+  const sliced: [number, number][] = [
+    interpolateAlongPolyline(coordinates, distances, start),
+  ]
+
+  for (let index = 1; index < distances.length - 1; index += 1) {
+    if (distances[index] <= start || distances[index] >= end) {
+      continue
+    }
+
+    sliced.push(coordinates[index])
+  }
+
+  sliced.push(interpolateAlongPolyline(coordinates, distances, end))
+
+  return sliced
+}

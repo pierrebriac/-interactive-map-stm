@@ -1,15 +1,145 @@
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;700&display=swap');
 
 :root {
+  /* Typography */
   font-family: 'Space Grotesk', sans-serif;
   line-height: 1.45;
   font-weight: 400;
-  color: #162228;
-  background: #f6efe4;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Surfaces */
+  --color-bg: #f6efe4;
+  --color-bg-gradient-a: rgba(255, 194, 106, 0.26);
+  --color-bg-gradient-b: rgba(15, 124, 168, 0.16);
+  --color-surface: rgba(255, 252, 246, 0.8);
+  --color-surface-elevated: rgba(255, 255, 255, 0.74);
+  --color-surface-input: rgba(255, 255, 255, 0.8);
+  --color-surface-result: rgba(255, 250, 244, 0.88);
+  --color-surface-result-active: rgba(255, 244, 229, 0.98);
+  --color-panel-bg: linear-gradient(180deg, rgba(251, 247, 240, 0.9), rgba(242, 233, 220, 0.84)), rgba(255, 255, 255, 0.72);
+  --color-overlay-bg: rgba(14, 26, 31, 0.7);
+  --color-toolbar-bg: rgba(16, 29, 34, 0.68);
+
+  /* Text */
+  --color-text: #162228;
+  --color-text-secondary: #5b5249;
+  --color-text-muted: #7e6552;
+  --color-text-action: #8e5427;
+  --color-text-light: #fff7ef;
+  --color-text-light-muted: rgba(255, 244, 233, 0.64);
+
+  /* Borders */
+  --color-border: rgba(20, 33, 39, 0.1);
+  --color-border-input: rgba(23, 42, 49, 0.14);
+  --color-border-result: rgba(20, 33, 39, 0.08);
+
+  /* Accent */
+  --color-accent: #ff8748;
+  --color-accent-gradient: linear-gradient(135deg, #ff7f45, #ffbc4d);
+  --color-accent-focus: rgba(255, 137, 64, 0.18);
+  --color-accent-focus-border: rgba(255, 137, 64, 0.42);
+  --color-accent-result-border: rgba(255, 138, 71, 0.4);
+
+  /* Mode colors */
+  --color-bus: #ff6c37;
+  --color-bus-light: #ffb080;
+  --color-bus-badge-bg: rgba(255, 172, 118, 0.28);
+  --color-bus-badge-text: #8a4216;
+  --color-metro: #0d89d3;
+  --color-metro-light: #8fd5ff;
+  --color-metro-badge-bg: rgba(107, 193, 255, 0.22);
+  --color-metro-badge-text: #0f6ead;
+  --color-rem: #52ad43;
+  --color-rem-light: #a9de9a;
+  --color-rem-badge-bg: rgba(148, 219, 126, 0.24);
+  --color-rem-badge-text: #2c7b2f;
+  --color-bixi: #ea1d2c;
+  --color-bixi-badge-bg: rgba(234, 29, 44, 0.18);
+  --color-bixi-badge-text: #a8151f;
+  --color-estimated: #1d82d2;
+  --color-status-only: #7b8a8e;
+
+  /* Buttons */
+  --color-primary-gradient: linear-gradient(135deg, #19a597, #0a7ca8);
+  --color-primary-text: #f8fffe;
+  --color-secondary-bg: rgba(21, 32, 39, 0.08);
+  --color-secondary-text: #1c2a31;
+
+  /* Status */
+  --color-pill-ghost-bg: rgba(255, 221, 183, 0.65);
+  --color-pill-ghost-text: #4d3a25;
+  --color-pill-ok-bg: rgba(110, 217, 181, 0.18);
+  --color-pill-ok-text: #0e5c52;
+  --color-pill-warn-bg: rgba(255, 184, 76, 0.26);
+  --color-pill-warn-text: #7d4f10;
+
+  /* Service states */
+  --color-state-normal: rgba(25, 165, 151, 0.18);
+  --color-state-warning: rgba(255, 188, 77, 0.35);
+  --color-state-interruption: rgba(232, 82, 63, 0.34);
+  --color-alert-bg: rgba(255, 243, 237, 0.93);
+  --color-alert-border: rgba(232, 82, 63, 0.2);
+
+  /* Shadows */
+  --shadow-card: 0 20px 42px rgba(48, 32, 12, 0.1);
+  --shadow-panel: 20px 0 48px rgba(21, 25, 28, 0.08);
+  --shadow-active: 0 14px 24px rgba(255, 127, 69, 0.22);
+
+  /* Radii */
+  --radius-card: 1.35rem;
+  --radius-input: 1rem;
+  --radius-pill: 999px;
+  --radius-button: 0.95rem;
+
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+[data-theme="dark"] {
+  --color-bg: #0f1a1f;
+  --color-bg-gradient-a: rgba(255, 160, 60, 0.08);
+  --color-bg-gradient-b: rgba(15, 124, 168, 0.06);
+  --color-surface: rgba(22, 34, 40, 0.85);
+  --color-surface-elevated: rgba(30, 44, 52, 0.8);
+  --color-surface-input: rgba(18, 30, 36, 0.9);
+  --color-surface-result: rgba(20, 32, 38, 0.88);
+  --color-surface-result-active: rgba(40, 52, 58, 0.98);
+  --color-panel-bg: linear-gradient(180deg, rgba(16, 26, 31, 0.95), rgba(12, 20, 24, 0.92)), rgba(10, 18, 22, 0.85);
+  --color-overlay-bg: rgba(8, 16, 20, 0.82);
+  --color-toolbar-bg: rgba(10, 20, 26, 0.78);
+  --color-text: #e8e2d8;
+  --color-text-secondary: #a09888;
+  --color-text-muted: #7a7068;
+  --color-text-action: #d4944f;
+  --color-text-light: #f0ebe3;
+  --color-text-light-muted: rgba(220, 210, 195, 0.5);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-input: rgba(255, 255, 255, 0.1);
+  --color-border-result: rgba(255, 255, 255, 0.06);
+  --color-accent-focus: rgba(255, 137, 64, 0.12);
+  --color-accent-focus-border: rgba(255, 137, 64, 0.3);
+  --color-accent-result-border: rgba(255, 138, 71, 0.25);
+  --color-pill-ghost-bg: rgba(255, 180, 100, 0.15);
+  --color-pill-ghost-text: #d4a060;
+  --color-pill-ok-bg: rgba(110, 217, 181, 0.12);
+  --color-pill-ok-text: #6ed9b5;
+  --color-pill-warn-bg: rgba(255, 184, 76, 0.15);
+  --color-pill-warn-text: #e8b44c;
+  --color-state-normal: rgba(25, 165, 151, 0.12);
+  --color-state-warning: rgba(255, 188, 77, 0.2);
+  --color-state-interruption: rgba(232, 82, 63, 0.2);
+  --color-alert-bg: rgba(50, 20, 15, 0.6);
+  --color-alert-border: rgba(232, 82, 63, 0.15);
+  --color-secondary-bg: rgba(255, 255, 255, 0.08);
+  --color-secondary-text: #d0c8be;
+  --shadow-card: 0 20px 42px rgba(0, 0, 0, 0.25);
+  --shadow-panel: 20px 0 48px rgba(0, 0, 0, 0.2);
+
+  color: var(--color-text);
+  background: var(--color-bg);
 }
 
 * {

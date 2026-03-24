@@ -2,6 +2,7 @@ import {
   startTransition,
   useDeferredValue,
   useEffect,
+  useMemo,
   useState,
 } from 'react'
 import './App.css'
@@ -71,6 +72,19 @@ function App() {
   const [plannerActiveField, setPlannerActiveField] = useState<
     'origin' | 'destination' | null
   >(null)
+  const [serviceStatusOpen, setServiceStatusOpen] = useState(false)
+  const [techStatsOpen, setTechStatsOpen] = useState(false)
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'light'
+    const stored = localStorage.getItem('transit-atlas-theme')
+    if (stored === 'dark' || stored === 'light') return stored
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('transit-atlas-theme', theme)
+  }, [theme])
 
   const deferredSearchQuery = useDeferredValue(searchQuery)
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
@@ -277,8 +291,11 @@ function App() {
     { id: 'satellite' as const, label: 'Aérien', available: false },
   ]
 
-  const favoritesFocus =
-    session && favorites.length > 0 && !selectedItem ? favorites : []
+  const favoritesFocus = useMemo(
+    () => (session && favorites.length > 0 && !selectedItem ? favorites : []),
+    [session, favorites, selectedItem],
+  )
+
   const selectedPlannerStation = selectedStation
     ? toPlannerStation(selectedStation)
     : null
@@ -287,6 +304,8 @@ function App() {
     : null
   const liveSummary = summarizeLiveEntities(live?.entities ?? [])
   const totalVisibleEntities = live?.entities.length ?? 0
+
+  const serviceStatusSummary = summarizeServiceStates(visibleServiceStates)
 
   const selectionCard = selectedRoute
     ? {
@@ -299,8 +318,8 @@ function App() {
               : `REM • ${selectedRoute.longName}`,
         note:
           selectedRoute.mode === 'bus'
-            ? 'Trajet complet de la ligne affiché sur la carte. Clique sur un bus ou cherche un numéro pour isoler la ligne.'
-            : 'La ligne et les stations associées sont isolées pour une lecture plus nette.',
+            ? 'Trajet complet affiché sur la carte.'
+            : 'Ligne et stations associées isolées.',
       }
     : selectedStation
       ? {
@@ -309,12 +328,12 @@ function App() {
             selectedStation.mode === 'metro' ? 'Station de métro' : 'Station du REM',
           note:
             selectedStation.routeIds.length > 0
-              ? `Correspondances visibles: ${selectedStation.routeIds
+              ? `Correspondances: ${selectedStation.routeIds
                   .map((routeId) =>
                     selectedStation.mode === 'metro' ? `ligne ${routeId}` : `REM ${routeId.replace(/^S/, 'A')}`,
                   )
                   .join(', ')}`
-              : 'Stations et véhicules proches visibles autour du point choisi.',
+              : 'Véhicules proches visibles.',
         }
       : null
 
@@ -455,10 +474,11 @@ function App() {
           onSelectItem={handleSelectItem}
         />
 
+        {/* Map toolbar */}
         <div className="map-toolbar">
           <div className="toolbar-brand">
-            <p className="eyebrow">Atlas STM / REM</p>
-            <strong>Montréal Transit Atlas</strong>
+            <strong>Transit Atlas</strong>
+            <span className={`freshness-dot ${live?.stale ? 'stale' : isFetchingLive ? 'updating' : 'fresh'}`} />
           </div>
 
           <div className="toolbar-actions">
@@ -467,108 +487,150 @@ function App() {
                 Tout réafficher
               </button>
             ) : null}
+
+            <button
+              className="toolbar-button subtle icon-button"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              title={theme === 'dark' ? 'Mode clair' : 'Mode sombre'}
+            >
+              {theme === 'dark' ? '☀' : '◑'}
+            </button>
+
+            {styleOptions.length > 1 ? (
+              <button
+                className="toolbar-button subtle icon-button"
+                onClick={() => setMapStyle(mapStyle === 'streets' ? 'satellite' : 'streets')}
+                disabled={!styleOptions.find(o => o.id === 'satellite')?.available}
+                title={mapStyle === 'streets' ? 'Vue aérienne' : 'Vue 2D'}
+              >
+                {mapStyle === 'streets' ? '🛰' : '🗺'}
+              </button>
+            ) : null}
+
             {isMobileViewport ? (
               <button
                 className="toolbar-button primary"
                 onClick={() => setIsPanelOpen((open) => !open)}
               >
-                {isPanelOpen ? 'Voir la carte' : 'Recherche & filtres'}
+                {isPanelOpen ? 'Carte' : 'Menu'}
               </button>
             ) : null}
           </div>
         </div>
 
-        <div className="map-overlay">
-          <div>
+        {/* Map legend overlay */}
+        <div className="map-legend">
+          <span className="legend-item"><i className="dot dot-live" />Temps réel</span>
+          <span className="legend-item"><i className="dot dot-estimated" />Estimé</span>
+          <span className="legend-item"><i className="dot dot-status" />Statut</span>
+        </div>
+
+        {/* Contextual info overlay - simplified */}
+        {(selectedRoute || selectedStation || isBootstrapping) ? (
+          <div className="map-overlay">
             <p className="overlay-title">
               {selectedRoute
                 ? `Ligne ${selectedRoute.shortName}`
                 : selectedStation
                   ? 'Station ciblée'
-                  : viewMode === 'combined'
-                    ? 'Vue combinée clarifiée'
-                    : `Vue ${modeLabel(viewMode)}`}
+                  : 'Chargement…'}
             </p>
             <p className="overlay-copy">
               {selectedRoute
-                ? 'Le tracé complet est visible, avec les véhicules de la ligne en priorité.'
+                ? 'Tracé complet avec véhicules de la ligne.'
                 : selectedStation
-                  ? 'Les correspondances et véhicules proches restent au premier plan.'
-                  : isBootstrapping
-                    ? 'Chargement du réseau de transport…'
-                    : 'Bus live, rail estimé, lecture rapide par mode et par ligne.'}
+                  ? 'Correspondances et véhicules proches.'
+                  : 'Chargement du réseau de transport…'}
             </p>
           </div>
-
-          <div className="overlay-stats">
-            <ModeStat label="Bus live" value={liveSummary.busRealtime} tone="bus" />
-            <ModeStat label="Métro estimé" value={liveSummary.metroEstimated} tone="metro" />
-            <ModeStat label="REM estimé" value={liveSummary.remEstimated} tone="rem" />
-          </div>
-        </div>
-
-        {isMobileViewport ? (
-          <button
-            className="mobile-search-launch"
-            onClick={() => setIsPanelOpen(true)}
-          >
-            Rechercher une ligne, une station ou planifier un trajet
-          </button>
         ) : null}
       </main>
 
+      {/* Sidebar / Bottom sheet */}
       <aside className={`control-panel ${isPanelOpen ? 'open' : 'closed'}`}>
+        {/* Drag handle (mobile) */}
+        {isMobileViewport ? (
+          <div className="sheet-handle-row" onClick={() => setIsPanelOpen(o => !o)}>
+            <div className="sheet-handle" />
+          </div>
+        ) : null}
+
+        {/* 1. Header - simplified */}
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Contrôle en direct</p>
-            <h1>Bus, métro, REM, puis le bon trajet.</h1>
-            <p className="lede">
-              Interface resserrée pour lire rapidement la ville, puis descendre au
-              niveau d’une ligne ou d’un itinéraire.
-            </p>
+            <h1>Transit Atlas</h1>
+            <p className="header-subtitle">Montréal en direct</p>
           </div>
-
           {isMobileViewport ? (
             <button
               className="panel-close"
               onClick={() => setIsPanelOpen(false)}
               aria-label="Fermer le panneau"
             >
-              Fermer
+              ✕
             </button>
           ) : null}
         </div>
 
-        <section className="panel-card overview-card">
-          <div className="status-row">
-            <span className="pill ghost">
-              {isFetchingLive ? 'Mise à jour…' : 'Live actif'}
-            </span>
-            <span className={`pill ${live?.stale ? 'warn' : 'ok'}`}>
-              {live?.stale ? 'Donnée possiblement périmée' : 'Flux à jour'}
-            </span>
+        {/* 2. Favorites (HERO) */}
+        <section className="panel-card favorites-card">
+          <div className="card-header-inline">
+            <p className="card-title">★ Favoris</p>
+            {session ? (
+              <button
+                className="text-action"
+                onClick={() => void logoutIdentity()}
+              >
+                {session.email ? session.email.split('@')[0] : 'Déconnexion'}
+              </button>
+            ) : null}
           </div>
 
-          <div className="summary-grid">
-            <div className="summary-metric">
-              <strong>{liveSummary.busRealtime}</strong>
-              <span>bus suivis</span>
+          {favorites.length > 0 ? (
+            <div className="favorites-grid">
+              {favorites.map((favorite) => (
+                <button
+                  key={`${favorite.type}:${favorite.id}`}
+                  className={`favorite-chip mode-${favorite.mode}`}
+                  onClick={() => handleSelectItem(favorite)}
+                >
+                  <strong>{favorite.label}</strong>
+                  <small>{favorite.subtitle}</small>
+                </button>
+              ))}
             </div>
-            <div className="summary-metric">
-              <strong>{liveSummary.metroEstimated}</strong>
-              <span>métros estimés</span>
+          ) : (
+            <div className="favorites-empty">
+              {session ? (
+                <p className="small-copy">
+                  Cherche une ligne ou une station, puis ajoute-la avec ★
+                </p>
+              ) : (
+                <>
+                  <p className="small-copy">
+                    Connecte-toi pour retrouver tes lignes favorites dès l'ouverture.
+                  </p>
+                  <div className="auth-actions">
+                    <button
+                      className="secondary-action"
+                      onClick={() => openIdentity('login')}
+                    >
+                      Connexion
+                    </button>
+                    <button
+                      className="primary-action"
+                      onClick={() => openIdentity('signup')}
+                    >
+                      Créer un compte
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="summary-metric">
-              <strong>{liveSummary.remEstimated}</strong>
-              <span>REM estimés</span>
-            </div>
-            <div className="summary-metric">
-              <strong>{totalVisibleEntities}</strong>
-              <span>points visibles</span>
-            </div>
-          </div>
+          )}
         </section>
 
+        {/* 3. Search */}
         <section className="panel-card">
           <div className="card-header-inline">
             <label className="card-title" htmlFor="search-input">
@@ -577,9 +639,7 @@ function App() {
             {searchQuery ? (
               <button
                 className="text-action"
-                onClick={() => {
-                  setSearchQuery('')
-                }}
+                onClick={() => setSearchQuery('')}
               >
                 Effacer
               </button>
@@ -596,12 +656,8 @@ function App() {
                 setIsPanelOpen(true)
               }
             }}
-            placeholder="Bus 24, ligne 2, Jean-Talon, Berri-UQAM…"
+            placeholder="Bus 24, ligne 2, Jean-Talon…"
           />
-          <p className="small-copy">
-            La recherche locale répond tout de suite et remonte les lignes avant les
-            stations quand tu tapes un numéro.
-          </p>
 
           {searchResults.length > 0 ? (
             <div className="search-results">
@@ -632,163 +688,146 @@ function App() {
               ))}
             </div>
           ) : searchQuery.trim() ? (
-            <p className="small-copy">Aucun résultat pour cette recherche.</p>
+            <p className="small-copy">Aucun résultat.</p>
           ) : null}
         </section>
 
+        {/* 4. Mode filter */}
         <section className="panel-card compact-card">
-          <div className="filter-group">
-            <span className="card-title">Modes</span>
-            <div className="segmented">
-              {[
-                ['combined', 'Combiné'],
+          <span className="card-title">Modes</span>
+          <div className="segmented five-up">
+            {(
+              [
+                ['combined', 'Tous'],
                 ['bus', 'Bus'],
                 ['metro', 'Métro'],
                 ['rem', 'REM'],
-              ].map(([id, label]) => (
-                <button
-                  key={id}
-                  className={viewMode === id ? 'segment active' : 'segment'}
-                  onClick={() =>
-                    startTransition(() => {
-                      setViewMode(id as ViewMode)
-                      if (
-                        selectedItem?.type === 'route' &&
-                        selectedItem.mode !== id &&
-                        id !== 'combined'
-                      ) {
-                        setSelectedItem(null)
-                      }
-                    })
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="filter-group">
-            <span className="card-title">Carte</span>
-            <div className="segmented two-up">
-              {styleOptions.map((option) => (
-                <button
-                  key={option.id}
-                  className={mapStyle === option.id ? 'segment active' : 'segment'}
-                  disabled={!option.available}
-                  onClick={() => setMapStyle(option.id)}
-                  title={
-                    option.available
-                      ? option.label
-                      : 'Style indisponible sans clé MapTiler'
-                  }
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
+                ['bixi', 'BIXI'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                className={`segment ${viewMode === id ? 'active' : ''} ${id === 'bixi' ? 'bixi-segment' : ''}`}
+                onClick={() => {
+                  if (id === 'bixi') return
+                  startTransition(() => {
+                    setViewMode(id as ViewMode)
+                    if (
+                      selectedItem?.type === 'route' &&
+                      selectedItem.mode !== id &&
+                      id !== 'combined'
+                    ) {
+                      setSelectedItem(null)
+                    }
+                  })
+                }}
+                disabled={id === 'bixi'}
+              >
+                {label}
+                {id === 'bixi' ? <span className="coming-soon-badge">Bientôt</span> : null}
+              </button>
+            ))}
           </div>
         </section>
 
-        <section className="panel-card selection-card">
-          <div className="card-header-inline">
-            <p className="card-title">Sélection</p>
-            {selectedItem ? (
-              <button className="text-action" onClick={handleClearSelection}>
-                Réinitialiser
-              </button>
-            ) : null}
-          </div>
-
-          {selectionCard ? (
-            <>
-              <h2>{selectionCard.title}</h2>
-              <p className="small-copy">{selectionCard.subtitle}</p>
-              <p className="selection-note">{selectionCard.note}</p>
-
-              <div className="selection-actions">
+        {/* 5. Selection card - only when selected */}
+        {selectionCard ? (
+          <section className="panel-card selection-card">
+            <div className="card-header-inline">
+              <div>
+                <h2>{selectionCard.title}</h2>
+                <p className="small-copy">{selectionCard.subtitle}</p>
+              </div>
+              <div className="selection-header-actions">
                 <button
-                  className="favorite-button"
+                  className="icon-action star-button"
                   onClick={() => void handleToggleFavorite()}
                   disabled={isSavingFavorite}
+                  title={selectedFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
                 >
-                  {selectedFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+                  {selectedFavorite ? '★' : '☆'}
+                </button>
+                <button className="text-action" onClick={handleClearSelection}>
+                  ✕
                 </button>
               </div>
-            </>
-          ) : (
-            <p className="small-copy">
-              Clique sur une ligne, une station, un bus ou utilise la recherche pour
-              isoler le flux et afficher le trajet utile sur la carte.
-            </p>
-          )}
+            </div>
+            <p className="small-copy selection-note">{selectionCard.note}</p>
+          </section>
+        ) : null}
 
-          <div className="legend-row">
-            <LegendTone label="Temps réel" tone="live" />
-            <LegendTone label="Estimé" tone="estimated" />
-            <LegendTone label="Statut seulement" tone="status" />
-          </div>
-        </section>
-
+        {/* 6. Planner */}
         <section className="panel-card planner-card">
-          <div className="card-header-inline">
-            <div>
-              <p className="card-title">Planificateur</p>
-              <p className="small-copy">
-                V1 centrée sur les stations déjà présentes dans l’atlas.
-              </p>
-            </div>
-            <button className="text-action" onClick={handlePlannerSwap}>
-              Inverser
-            </button>
+          <p className="card-title">Planificateur</p>
+
+          <div className="segmented three-up planner-mode-switch">
+            {(
+              [
+                ['transit', '🚇', 'Transport'],
+                ['walking', '🚶', 'À pied'],
+                ['bixi', '🚲', 'BIXI'],
+              ] as const
+            ).map(([id, icon, label]) => (
+              <button
+                key={id}
+                className={`segment ${plannerMode === id ? 'active' : ''} ${id === 'bixi' ? 'bixi-segment' : ''}`}
+                onClick={() => setPlannerMode(id)}
+                disabled={id === 'bixi'}
+              >
+                <span className="segment-icon">{icon}</span>
+                {label}
+                {id === 'bixi' ? <span className="coming-soon-badge">Bientôt</span> : null}
+              </button>
+            ))}
           </div>
 
-          <div className="segmented two-up planner-mode-switch">
-            <button
-              className={plannerMode === 'transit' ? 'segment active' : 'segment'}
-              onClick={() => setPlannerMode('transit')}
-            >
-              Transport
-            </button>
-            <button
-              className={plannerMode === 'walking' ? 'segment active' : 'segment'}
-              onClick={() => setPlannerMode('walking')}
-            >
-              À pied
-            </button>
-          </div>
-
-          <div className="planner-fields">
-            <div className="planner-field">
-              <label className="card-title" htmlFor="planner-origin">
-                Départ
-              </label>
-              <input
-                id="planner-origin"
-                className="search-input"
-                value={plannerOriginQuery}
-                onFocus={() => setPlannerActiveField('origin')}
-                onChange={(event) =>
-                  handlePlannerFieldChange('origin', event.target.value)
-                }
-                placeholder="Choisir une station"
-              />
+          <div className="planner-fields-wrapper">
+            <div className="planner-timeline">
+              <span className="timeline-dot origin-dot" />
+              <span className="timeline-line" />
+              <span className="timeline-dot destination-dot" />
             </div>
 
-            <div className="planner-field">
-              <label className="card-title" htmlFor="planner-destination">
-                Arrivée
-              </label>
-              <input
-                id="planner-destination"
-                className="search-input"
-                value={plannerDestinationQuery}
-                onFocus={() => setPlannerActiveField('destination')}
-                onChange={(event) =>
-                  handlePlannerFieldChange('destination', event.target.value)
-                }
-                placeholder="Choisir une station"
-              />
+            <div className="planner-fields">
+              <div className="planner-field">
+                <label className="field-label" htmlFor="planner-origin">
+                  Départ
+                </label>
+                <input
+                  id="planner-origin"
+                  className="search-input"
+                  value={plannerOriginQuery}
+                  onFocus={() => setPlannerActiveField('origin')}
+                  onChange={(event) =>
+                    handlePlannerFieldChange('origin', event.target.value)
+                  }
+                  placeholder="Choisir une station"
+                />
+              </div>
+
+              <button
+                className="swap-button"
+                onClick={handlePlannerSwap}
+                title="Inverser départ et arrivée"
+              >
+                ⇅
+              </button>
+
+              <div className="planner-field">
+                <label className="field-label" htmlFor="planner-destination">
+                  Arrivée
+                </label>
+                <input
+                  id="planner-destination"
+                  className="search-input"
+                  value={plannerDestinationQuery}
+                  onFocus={() => setPlannerActiveField('destination')}
+                  onChange={(event) =>
+                    handlePlannerFieldChange('destination', event.target.value)
+                  }
+                  placeholder="Choisir une station"
+                />
+              </div>
             </div>
           </div>
 
@@ -829,11 +868,20 @@ function App() {
             </div>
           ) : null}
 
-          {plannerResult ? (
+          {plannerMode === 'bixi' ? (
+            <div className="planner-bixi-placeholder">
+              <p className="small-copy">
+                Le calcul d'itinéraire BIXI sera bientôt disponible.
+              </p>
+            </div>
+          ) : plannerResult ? (
             <div className="planner-result">
               <div className="planner-summary">
-                <strong>{plannerResult.durationMin} min</strong>
-                <span>
+                <div className="planner-duration">
+                  <strong>{plannerResult.durationMin}</strong>
+                  <span>min</span>
+                </div>
+                <span className="planner-details">
                   {formatDistanceKm(plannerResult.distanceKm)} •{' '}
                   {plannerMode === 'transit'
                     ? `${plannerResult.transfers} correspondance${plannerResult.transfers > 1 ? 's' : ''}`
@@ -844,7 +892,10 @@ function App() {
               <div className="planner-steps">
                 {plannerResult.segments.length > 0 ? (
                   plannerResult.segments.map((segment, index) => (
-                    <div key={`${segment.label}:${index}`} className="planner-step">
+                    <div
+                      key={`${segment.label}:${index}`}
+                      className={`planner-step step-${segment.mode} ${segment.kind === 'walk' ? 'step-walk' : ''}`}
+                    >
                       <div className="planner-step-top">
                         <strong>{segment.label}</strong>
                         <span>{segment.durationMin} min</span>
@@ -870,102 +921,90 @@ function App() {
             </div>
           ) : plannerOrigin && plannerDestination ? (
             <p className="small-copy">
-              Aucun trajet transit calculé entre ces stations dans ce modèle.
-              Essaie le mode à pied ou une autre paire de stations.
+              Aucun trajet trouvé. Essaie un autre mode ou d'autres stations.
             </p>
           ) : (
             <p className="small-copy">
-              Choisis un départ et une arrivée pour obtenir un temps de marche ou
-              un parcours réseau estimé.
+              Choisis un départ et une arrivée.
             </p>
           )}
         </section>
 
-        <section className="panel-card">
-          <div className="auth-row">
-            <div>
-              <p className="card-title">Favoris</p>
-              <p className="small-copy">
-                {session
-                  ? session.email ?? 'Compte connecté'
-                  : 'Connexion optionnelle pour synchroniser tes favoris'}
-              </p>
-            </div>
-
-            {session ? (
-              <button
-                className="secondary-action"
-                onClick={() => void logoutIdentity()}
-              >
-                Déconnexion
-              </button>
-            ) : (
-              <div className="auth-actions">
-                <button
-                  className="secondary-action"
-                  onClick={() => openIdentity('login')}
-                >
-                  Connexion
-                </button>
-                <button
-                  className="primary-action"
-                  onClick={() => openIdentity('signup')}
-                >
-                  Créer un compte
-                </button>
-              </div>
-            )}
-          </div>
-
-          {favorites.length > 0 ? (
-            <div className="favorites-list">
-              {favorites.map((favorite) => (
-                <button
-                  key={`${favorite.type}:${favorite.id}`}
-                  className="favorite-chip"
-                  onClick={() => handleSelectItem(favorite)}
-                >
-                  <strong>{favorite.label}</strong>
-                  <small>{favorite.subtitle}</small>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="small-copy">
-              {session
-                ? 'Aucun favori enregistré pour le moment.'
-                : 'Connecte-toi pour sauvegarder des lignes et des stations.'}
-            </p>
-          )}
-        </section>
-
-        <section className="panel-card">
-          <div className="card-header-inline">
+        {/* 7. Service status - collapsed */}
+        <section className="panel-card collapsible-card">
+          <button
+            className="collapsible-header"
+            onClick={() => setServiceStatusOpen(open => !open)}
+          >
             <div>
               <p className="card-title">État du service</p>
-              <p className="small-copy">
-                {viewMode === 'combined'
-                  ? 'Vue filtrée pour éviter de noyer les alertes bus.'
-                  : `Focus ${modeLabel(viewMode)}.`}
-              </p>
+              <p className="small-copy">{serviceStatusSummary}</p>
             </div>
-            {live ? (
-              <small className="small-copy">
-                {new Date(live.sourceTimestamp).toLocaleTimeString('fr-CA', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </small>
-            ) : null}
-          </div>
+            <span className={`chevron ${serviceStatusOpen ? 'open' : ''}`}>›</span>
+          </button>
 
-          <div className="state-list">
-            {visibleServiceStates.map((state) => (
-              <ServiceStateCard key={`${state.mode}:${state.routeId}`} state={state} />
-            ))}
-          </div>
+          {serviceStatusOpen ? (
+            <div className="state-list">
+              {visibleServiceStates.length > 0 ? (
+                visibleServiceStates.map((state) => (
+                  <ServiceStateCard key={`${state.mode}:${state.routeId}`} state={state} />
+                ))
+              ) : (
+                <p className="small-copy">Aucune alerte en cours.</p>
+              )}
+            </div>
+          ) : null}
         </section>
 
+        {/* 8. Tech stats - collapsed */}
+        <section className="panel-card collapsible-card">
+          <button
+            className="collapsible-header"
+            onClick={() => setTechStatsOpen(open => !open)}
+          >
+            <div>
+              <p className="card-title">Statistiques</p>
+              <p className="small-copy">
+                {liveSummary.busRealtime} bus • {liveSummary.metroEstimated} métros • {liveSummary.remEstimated} REM
+              </p>
+            </div>
+            <span className={`chevron ${techStatsOpen ? 'open' : ''}`}>›</span>
+          </button>
+
+          {techStatsOpen ? (
+            <div className="tech-stats-content">
+              <div className="status-row">
+                <span className={`pill ${isFetchingLive ? 'ghost' : 'ok'}`}>
+                  {isFetchingLive ? 'Mise à jour…' : 'Live actif'}
+                </span>
+                <span className={`pill ${live?.stale ? 'warn' : 'ok'}`}>
+                  {live?.stale ? 'Données périmées' : 'Flux à jour'}
+                </span>
+              </div>
+
+              <div className="summary-grid">
+                <div className="summary-metric">
+                  <strong>{liveSummary.busRealtime}</strong>
+                  <span>bus suivis</span>
+                </div>
+                <div className="summary-metric">
+                  <strong>{liveSummary.metroEstimated}</strong>
+                  <span>métros estimés</span>
+                </div>
+                <div className="summary-metric">
+                  <strong>{liveSummary.remEstimated}</strong>
+                  <span>REM estimés</span>
+                </div>
+                <div className="summary-metric">
+                  <strong>{totalVisibleEntities}</strong>
+                  <span>points visibles</span>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        {/* 9. Alerts */}
         {(appError || live?.warnings.length || bootstrap?.warnings.length) && (
           <section className="panel-card alert-card">
             <p className="card-title">Attention</p>
@@ -1012,6 +1051,10 @@ function filterServiceStates(
     return [...nonBus, ...busWarnings]
   }
 
+  if (viewMode === 'bixi') {
+    return []
+  }
+
   return serviceStates.filter((state) => state.mode === viewMode)
 }
 
@@ -1023,7 +1066,7 @@ function deriveModes(
     return [selectedItem.mode]
   }
 
-  if (viewMode === 'combined') {
+  if (viewMode === 'combined' || viewMode === 'bixi') {
     return ['bus', 'metro', 'rem']
   }
 
@@ -1044,12 +1087,6 @@ function toFavoriteItem(item: SearchItem | FavoriteItem): FavoriteItem {
   }
 
   return item
-}
-
-function modeLabel(mode: Exclude<ViewMode, 'combined'>) {
-  if (mode === 'bus') return 'bus'
-  if (mode === 'metro') return 'métro'
-  return 'REM'
 }
 
 function summarizeLiveEntities(entities: LiveEntity[]) {
@@ -1077,40 +1114,16 @@ function summarizeLiveEntities(entities: LiveEntity[]) {
   )
 }
 
+function summarizeServiceStates(states: ServiceState[]) {
+  const warnings = states.filter(s => s.status === 'warning' || s.status === 'interruption')
+  const normal = states.filter(s => s.status === 'normal')
+  if (warnings.length === 0 && normal.length === 0) return 'Aucune donnée'
+  if (warnings.length === 0) return `${normal.length} ligne${normal.length > 1 ? 's' : ''} normale${normal.length > 1 ? 's' : ''}`
+  return `${warnings.length} alerte${warnings.length > 1 ? 's' : ''}`
+}
+
 function formatDistanceKm(distanceKm: number) {
   return `${distanceKm.toFixed(distanceKm >= 10 ? 0 : 1)} km`
-}
-
-function LegendTone({
-  label,
-  tone,
-}: {
-  label: string
-  tone: 'live' | 'estimated' | 'status'
-}) {
-  return (
-    <span className={`legend-tone ${tone}`}>
-      <i />
-      {label}
-    </span>
-  )
-}
-
-function ModeStat({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: number
-  tone: 'bus' | 'metro' | 'rem'
-}) {
-  return (
-    <div className={`mode-stat ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  )
 }
 
 function ServiceStateCard({ state }: { state: ServiceState }) {
