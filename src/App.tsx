@@ -1,25 +1,24 @@
 import {
+  type ReactNode,
   startTransition,
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import './App.css'
-import { MapView } from './components/MapView.tsx'
-import {
-  buildPlanner,
-  type PlannerMode,
-  type PlannerStation,
-  toPlannerStation,
-} from './lib/planner.ts'
+import { MapView, type MapCameraRequest } from './components/MapView.tsx'
 import {
   fetchBootstrap,
   fetchFavorites,
+  fetchGeocode,
   fetchLiveData,
+  fetchPlan,
+  fetchProfile,
   saveFavorites,
+  saveProfile,
 } from './lib/api.ts'
-import { searchItems } from './lib/search.ts'
 import {
   getIdentitySession,
   initIdentity,
@@ -27,18 +26,37 @@ import {
   openIdentity,
   subscribeToIdentity,
 } from './lib/auth.ts'
+import { searchItems } from './lib/search.ts'
 import type {
   BootstrapResponse,
   FavoriteItem,
   IdentitySession,
+  Itinerary,
+  ItineraryMode,
   LiveEntity,
   LiveResponse,
+  LocationPreference,
   MapStyle,
+  ResolvedPlace,
+  SavedPlace,
   SearchItem,
   ServiceState,
   TransportMode,
+  UserProfile,
   ViewMode,
 } from './shared/types.ts'
+
+type SurfaceMode = 'home' | 'explore' | 'route'
+type RoutePanelMode = 'transit' | 'walking' | 'cycling'
+type RouteField = 'origin' | 'destination'
+
+const DEFAULT_PROFILE: UserProfile = {
+  displayName: '',
+  savedPlaces: [],
+  locationPreference: 'unknown',
+}
+
+const CURRENT_LOCATION_PLACEHOLDER = 'Ma position'
 
 function App() {
   const initialMobile =
@@ -50,36 +68,49 @@ function App() {
   const [live, setLive] = useState<LiveResponse | null>(null)
   const [session, setSession] = useState<IdentitySession | null>(null)
   const [favorites, setFavorites] = useState<FavoriteItem[]>([])
+  const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE)
   const [selectedItem, setSelectedItem] = useState<SearchItem | FavoriteItem | null>(
     null,
   )
+  const [selectedPlace, setSelectedPlace] = useState<ResolvedPlace | null>(null)
+  const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>('home')
   const [viewMode, setViewMode] = useState<ViewMode>('combined')
   const [mapStyle, setMapStyle] = useState<MapStyle>('streets')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [appError, setAppError] = useState<string | null>(null)
-  const [isBootstrapping, setIsBootstrapping] = useState(true)
-  const [isFetchingLive, setIsFetchingLive] = useState(false)
-  const [isSavingFavorite, setIsSavingFavorite] = useState(false)
-  const [isMobileViewport, setIsMobileViewport] = useState(initialMobile)
-  const [isPanelOpen, setIsPanelOpen] = useState(!initialMobile)
-  const [plannerMode, setPlannerMode] = useState<PlannerMode>('transit')
-  const [plannerOriginQuery, setPlannerOriginQuery] = useState('')
-  const [plannerDestinationQuery, setPlannerDestinationQuery] = useState('')
-  const [plannerOrigin, setPlannerOrigin] = useState<PlannerStation | null>(null)
-  const [plannerDestination, setPlannerDestination] = useState<PlannerStation | null>(
-    null,
-  )
-  const [plannerActiveField, setPlannerActiveField] = useState<
-    'origin' | 'destination' | null
-  >(null)
-  const [serviceStatusOpen, setServiceStatusOpen] = useState(false)
-  const [techStatsOpen, setTechStatsOpen] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window === 'undefined') return 'light'
     const stored = localStorage.getItem('transit-atlas-theme')
     if (stored === 'dark' || stored === 'light') return stored
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    return 'light'
   })
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchPlaces, setSearchPlaces] = useState<ResolvedPlace[]>([])
+  const [isSearchingPlaces, setIsSearchingPlaces] = useState(false)
+  const [routeMode, setRouteMode] = useState<RoutePanelMode>('transit')
+  const [routeOriginQuery, setRouteOriginQuery] = useState('')
+  const [routeDestinationQuery, setRouteDestinationQuery] = useState('')
+  const [routeOrigin, setRouteOrigin] = useState<ResolvedPlace | null>(null)
+  const [routeDestination, setRouteDestination] = useState<ResolvedPlace | null>(null)
+  const [activeRouteField, setActiveRouteField] = useState<RouteField>('destination')
+  const [routeSuggestions, setRouteSuggestions] = useState<ResolvedPlace[]>([])
+  const [planItineraries, setPlanItineraries] = useState<Itinerary[]>([])
+  const [planWarnings, setPlanWarnings] = useState<string[]>([])
+  const [selectedItineraryId, setSelectedItineraryId] = useState<string | null>(null)
+  const [isPlanning, setIsPlanning] = useState(false)
+  const [planError, setPlanError] = useState<string | null>(null)
+  const [appError, setAppError] = useState<string | null>(null)
+  const [isFetchingLive, setIsFetchingLive] = useState(false)
+  const [isSavingFavorite, setIsSavingFavorite] = useState(false)
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [isMobileViewport, setIsMobileViewport] = useState(initialMobile)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(!initialMobile)
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false)
+  const [cameraRequest, setCameraRequest] = useState<MapCameraRequest | null>(null)
+  const [currentLocation, setCurrentLocation] = useState<ResolvedPlace | null>(null)
+  const [isLocating, setIsLocating] = useState(false)
+  const [locationHint, setLocationHint] = useState<string | null>(null)
+  const [browserLocationPreference, setBrowserLocationPreference] =
+    useState<LocationPreference>('unknown')
+  const hasInitializedCameraRef = useRef(false)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -87,9 +118,8 @@ function App() {
   }, [theme])
 
   const deferredSearchQuery = useDeferredValue(searchQuery)
-  const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
-  const selectedStationId =
-    selectedItem?.type === 'station' ? selectedItem.id : null
+  const deferredRouteOriginQuery = useDeferredValue(routeOriginQuery)
+  const deferredRouteDestinationQuery = useDeferredValue(routeDestinationQuery)
 
   useEffect(() => {
     let cancelled = false
@@ -107,10 +137,6 @@ function App() {
               ? error.message
               : 'Impossible de charger la carte réseau.',
           )
-        }
-      } finally {
-        if (!cancelled) {
-          setIsBootstrapping(false)
         }
       }
     }
@@ -137,29 +163,42 @@ function App() {
   useEffect(() => {
     if (!session?.token) {
       setFavorites([])
+      setProfile(DEFAULT_PROFILE)
       return
     }
 
     let cancelled = false
 
-    const loadFavorites = async () => {
+    const loadAccountSurface = async () => {
+      const token = session.token
+      if (!token) {
+        return
+      }
+
       try {
-        const response = await fetchFavorites(session.token as string)
-        if (!cancelled) {
-          setFavorites(response.favorites)
+        const [favoritesResponse, profileResponse] = await Promise.all([
+          fetchFavorites(token),
+          fetchProfile(token),
+        ])
+
+        if (cancelled) {
+          return
         }
+
+        setFavorites(favoritesResponse.favorites)
+        setProfile(profileResponse.profile)
       } catch (error) {
         if (!cancelled) {
           setAppError(
             error instanceof Error
               ? error.message
-              : 'Impossible de charger les favoris.',
+              : 'Impossible de charger le profil utilisateur.',
           )
         }
       }
     }
 
-    void loadFavorites()
+    void loadAccountSurface()
 
     return () => {
       cancelled = true
@@ -176,7 +215,7 @@ function App() {
       const matches = event?.matches ?? media.matches
       setIsMobileViewport(matches)
       if (!matches) {
-        setIsPanelOpen(true)
+        setIsSidebarOpen(true)
       }
     }
 
@@ -185,6 +224,103 @@ function App() {
 
     return () => media.removeEventListener('change', syncViewport)
   }, [])
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.permissions?.query) {
+      return
+    }
+
+    let cancelled = false
+
+    const syncPermission = async () => {
+      try {
+        const status = await navigator.permissions.query({
+          name: 'geolocation',
+        } as PermissionDescriptor)
+
+        if (!cancelled) {
+          setBrowserLocationPreference(permissionStateToPreference(status.state))
+        }
+
+        status.onchange = () => {
+          setBrowserLocationPreference(permissionStateToPreference(status.state))
+        }
+      } catch {
+        if (!cancelled) {
+          setBrowserLocationPreference('unknown')
+        }
+      }
+    }
+
+    void syncPermission()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
+  const selectedStationId = selectedItem?.type === 'station' ? selectedItem.id : null
+  const selectedRoute = bootstrap?.routes.find((route) => route.id === selectedRouteId) ?? null
+  const selectedStation =
+    bootstrap?.stations.find((station) => station.id === selectedStationId) ?? null
+  const selectedFavorite =
+    selectedItem &&
+    favorites.some(
+      (favorite) =>
+        favorite.type === selectedItem.type && favorite.id === selectedItem.id,
+    )
+
+  const pinnedRouteFavorites = useMemo(
+    () =>
+      favorites.filter(
+        (favorite) => favorite.type === 'route' && favorite.pinnedToMap,
+      ),
+    [favorites],
+  )
+  const pinnedRouteIds = useMemo(
+    () => pinnedRouteFavorites.map((favorite) => favorite.id),
+    [pinnedRouteFavorites],
+  )
+  const selectedStationRouteIds = useMemo(
+    () => selectedStation?.routeIds ?? [],
+    [selectedStation],
+  )
+  const itineraryModes = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          planItineraries.flatMap((itinerary) =>
+            itinerary.segments
+              .filter((segment) => segment.kind === 'ride')
+              .map((segment) => segment.routeId)
+              .filter((routeId): routeId is string => Boolean(routeId)),
+          ),
+        ),
+      ),
+    [planItineraries],
+  )
+
+  const routeFocusIds = useMemo(() => {
+    if (selectedRouteId) {
+      return uniqueStrings([selectedRouteId, ...pinnedRouteIds])
+    }
+
+    if (selectedStationRouteIds.length > 0) {
+      return uniqueStrings([...selectedStationRouteIds, ...pinnedRouteIds])
+    }
+
+    if (itineraryModes.length > 0) {
+      return uniqueStrings([...itineraryModes, ...pinnedRouteIds])
+    }
+
+    return pinnedRouteIds
+  }, [itineraryModes, pinnedRouteIds, selectedRouteId, selectedStationRouteIds])
+
+  const selectedItinerary =
+    planItineraries.find((itinerary) => itinerary.id === selectedItineraryId) ??
+    planItineraries[0] ??
+    null
 
   useEffect(() => {
     if (!bootstrap) {
@@ -196,12 +332,11 @@ function App() {
 
     const loadLive = async () => {
       setIsFetchingLive(true)
-      const modes = deriveModes(viewMode, selectedItem)
 
       try {
         const data = await fetchLiveData({
-          modes,
-          routeId: selectedRouteId,
+          modes: deriveModes(viewMode, selectedItem, selectedItinerary),
+          routeIds: routeFocusIds,
           stationId: selectedStationId,
         })
 
@@ -232,80 +367,269 @@ function App() {
       cancelled = true
       window.clearInterval(intervalId)
     }
-  }, [bootstrap, selectedItem, selectedRouteId, selectedStationId, viewMode])
+  }, [bootstrap, routeFocusIds, selectedItem, selectedItinerary, selectedStationId, viewMode])
+
+  const networkSearchResults = useMemo(
+    () =>
+      bootstrap
+        ? searchItems(bootstrap.searchIndex, deferredSearchQuery, { limit: 10 })
+        : [],
+    [bootstrap, deferredSearchQuery],
+  )
+
+  const routeSuggestionQuery =
+    activeRouteField === 'origin'
+      ? deferredRouteOriginQuery
+      : deferredRouteDestinationQuery
 
   useEffect(() => {
-    if (selectedItem || favorites.length === 0 || !session) {
+    const query = deferredSearchQuery.trim()
+    if (surfaceMode === 'route' || query.length < 3) {
+      setSearchPlaces([])
       return
     }
 
-    startTransition(() => {
-      const primaryFavorite = favorites[0]
-      if (primaryFavorite.type === 'route') {
-        setViewMode(primaryFavorite.mode)
-      }
+    let cancelled = false
+    setIsSearchingPlaces(true)
+
+    void fetchGeocode(query, 6)
+      .then((response) => {
+        if (!cancelled) {
+          setSearchPlaces(response.features)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAppError(
+            error instanceof Error
+              ? error.message
+              : 'Impossible de charger les suggestions d’adresses.',
+          )
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsSearchingPlaces(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [deferredSearchQuery, surfaceMode])
+
+  useEffect(() => {
+    const query = routeSuggestionQuery.trim()
+    if (surfaceMode !== 'route' || query.length < 2) {
+      setRouteSuggestions([])
+      return
+    }
+
+    let cancelled = false
+
+    void fetchGeocode(query, 6)
+      .then((response) => {
+        if (!cancelled) {
+          setRouteSuggestions(response.features)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAppError(
+            error instanceof Error
+              ? error.message
+              : 'Impossible de charger les suggestions de trajet.',
+          )
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [routeSuggestionQuery, surfaceMode])
+
+  const routeStationSuggestions = useMemo(() => {
+    if (!bootstrap || surfaceMode !== 'route') {
+      return []
+    }
+
+    return searchItems(bootstrap.searchIndex, routeSuggestionQuery, {
+      limit: 5,
+      types: ['station'],
+    }).map(toResolvedPlace)
+  }, [bootstrap, routeSuggestionQuery, surfaceMode])
+
+  const effectiveRouteSuggestions = useMemo(() => {
+    const deduped = new Map<string, ResolvedPlace>()
+
+    for (const suggestion of [...routeStationSuggestions, ...routeSuggestions]) {
+      deduped.set(`${suggestion.id}:${suggestion.address}`, suggestion)
+    }
+
+    return Array.from(deduped.values()).slice(0, 8)
+  }, [routeStationSuggestions, routeSuggestions])
+
+  useEffect(() => {
+    if (!routeOrigin || !routeDestination || surfaceMode !== 'route') {
+      setPlanItineraries([])
+      setPlanWarnings([])
+      setPlanError(null)
+      return
+    }
+
+    let cancelled = false
+    setIsPlanning(true)
+    setPlanError(null)
+
+    const modes =
+      routeMode === 'transit'
+        ? (['transit'] satisfies ItineraryMode[])
+        : routeMode === 'walking'
+          ? (['walking'] satisfies ItineraryMode[])
+          : (['cycling', 'bixi'] satisfies ItineraryMode[])
+
+    void fetchPlan({
+      from: routeOrigin.address,
+      to: routeDestination.address,
+      fromLat: routeOrigin.lat,
+      fromLon: routeOrigin.lon,
+      toLat: routeDestination.lat,
+      toLon: routeDestination.lon,
+      modes,
     })
-  }, [favorites, selectedItem, session])
+      .then((response) => {
+        if (cancelled) {
+          return
+        }
 
-  const searchResults = bootstrap
-    ? searchItems(bootstrap.searchIndex, deferredSearchQuery, { limit: 14 })
-    : []
+        setPlanItineraries(response.itineraries)
+        setPlanWarnings(response.warnings)
+        setSelectedItineraryId(response.itineraries[0]?.id ?? null)
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setPlanItineraries([])
+          setPlanWarnings([])
+          setPlanError(
+            error instanceof Error
+              ? error.message
+              : 'Impossible de calculer cet itinéraire.',
+          )
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsPlanning(false)
+        }
+      })
 
-  const plannerSearchPool = bootstrap
-    ? bootstrap.searchIndex.filter(
-        (item): item is SearchItem => item.type === 'station',
+    return () => {
+      cancelled = true
+    }
+  }, [routeDestination, routeMode, routeOrigin, surfaceMode])
+
+  useEffect(() => {
+    if (!bootstrap || hasInitializedCameraRef.current) {
+      return
+    }
+
+    hasInitializedCameraRef.current = true
+
+    if (pinnedRouteFavorites.length > 0) {
+      setCameraRequest(
+        buildRouteCameraRequest(bootstrap, pinnedRouteFavorites.map((favorite) => favorite.id)),
       )
-    : []
-  const plannerSuggestions =
-    plannerActiveField === 'origin'
-      ? searchItems(plannerSearchPool, plannerOriginQuery, {
-          limit: 8,
-          types: ['station'],
-        })
-      : plannerActiveField === 'destination'
-        ? searchItems(plannerSearchPool, plannerDestinationQuery, {
-            limit: 8,
-            types: ['station'],
-          })
-        : []
+      return
+    }
 
-  const visibleServiceStates = filterServiceStates(
-    live?.serviceStates ?? [],
-    viewMode,
-    selectedItem,
-    bootstrap,
-  )
-  const selectedRoute = bootstrap?.routes.find((route) => route.id === selectedRouteId)
-  const selectedStation = bootstrap?.stations.find(
-    (station) => station.id === selectedStationId,
-  )
-  const selectedFavorite =
-    selectedItem &&
-    favorites.some(
-      (favorite) =>
-        favorite.type === selectedItem.type && favorite.id === selectedItem.id,
-    )
+    setCameraRequest({
+      id: createRequestId('bootstrap'),
+      kind: 'bounds',
+      points: bootstrap.shapes.flatMap((shape) => shape.coordinates),
+      padding: 52,
+      duration: 0,
+    })
+  }, [bootstrap, pinnedRouteFavorites])
 
+  useEffect(() => {
+    if (!selectedRoute || !bootstrap) {
+      return
+    }
+
+    setCameraRequest(buildRouteCameraRequest(bootstrap, [selectedRoute.id]))
+  }, [bootstrap, selectedRoute])
+
+  useEffect(() => {
+    if (!selectedStation) {
+      return
+    }
+
+    setCameraRequest({
+      id: createRequestId('station'),
+      kind: 'center',
+      center: [selectedStation.lon, selectedStation.lat],
+      zoom: 13.8,
+      duration: 700,
+    })
+  }, [selectedStation])
+
+  useEffect(() => {
+    if (!selectedPlace) {
+      return
+    }
+
+    setCameraRequest({
+      id: createRequestId('place'),
+      kind: 'center',
+      center: [selectedPlace.lon, selectedPlace.lat],
+      zoom: 14.2,
+      duration: 700,
+    })
+  }, [selectedPlace])
+
+  useEffect(() => {
+    if (!selectedItinerary) {
+      return
+    }
+
+    const points = selectedItinerary.segments.flatMap((segment) => segment.geometry)
+    if (points.length === 0) {
+      return
+    }
+
+    setCameraRequest({
+      id: createRequestId('itinerary'),
+      kind: 'bounds',
+      points,
+      padding: isMobileViewport ? 96 : 132,
+      duration: 760,
+    })
+  }, [isMobileViewport, selectedItinerary])
+
+  const searchSections = useMemo(
+    () => ({
+      routes: networkSearchResults.filter((item) => item.type === 'route'),
+      stations: networkSearchResults.filter((item) => item.type === 'station'),
+      places: searchPlaces,
+    }),
+    [networkSearchResults, searchPlaces],
+  )
+
+  const serviceStatusSummary = summarizeServiceStates(live?.serviceStates ?? [])
+  const liveSummary = summarizeLiveEntities(live?.entities ?? [])
   const styleOptions = bootstrap?.styles ?? [
     { id: 'streets' as const, label: '2D', available: true },
     { id: 'satellite' as const, label: 'Aérien', available: false },
   ]
-
-  const favoritesFocus = useMemo(
-    () => (session && favorites.length > 0 && !selectedItem ? favorites : []),
-    [session, favorites, selectedItem],
-  )
-
-  const selectedPlannerStation = selectedStation
-    ? toPlannerStation(selectedStation)
-    : null
-  const plannerResult = bootstrap
-    ? buildPlanner(bootstrap, plannerOrigin, plannerDestination, plannerMode)
-    : null
-  const liveSummary = summarizeLiveEntities(live?.entities ?? [])
-  const totalVisibleEntities = live?.entities.length ?? 0
-
-  const serviceStatusSummary = summarizeServiceStates(visibleServiceStates)
+  const homePlace = profile.savedPlaces.find((place) => place.kind === 'home') ?? null
+  const workPlace = profile.savedPlaces.find((place) => place.kind === 'work') ?? null
+  const extraPlaces = profile.savedPlaces.filter((place) => place.kind === 'saved')
+  const effectiveLocationPreference =
+    browserLocationPreference === 'granted'
+      ? 'granted'
+      : profile.locationPreference !== 'unknown'
+        ? profile.locationPreference
+        : browserLocationPreference
 
   const selectionCard = selectedRoute
     ? {
@@ -318,8 +642,8 @@ function App() {
               : `REM • ${selectedRoute.longName}`,
         note:
           selectedRoute.mode === 'bus'
-            ? 'Trajet complet affiché sur la carte.'
-            : 'Ligne et stations associées isolées.',
+            ? 'Ligne complète affichée avec les véhicules en circulation.'
+            : 'Ligne et véhicules actifs isolés sur la carte.',
       }
     : selectedStation
       ? {
@@ -328,24 +652,59 @@ function App() {
             selectedStation.mode === 'metro' ? 'Station de métro' : 'Station du REM',
           note:
             selectedStation.routeIds.length > 0
-              ? `Correspondances: ${selectedStation.routeIds
-                  .map((routeId) =>
-                    selectedStation.mode === 'metro' ? `ligne ${routeId}` : `REM ${routeId.replace(/^S/, 'A')}`,
-                  )
-                  .join(', ')}`
+              ? `Correspondances: ${selectedStation.routeIds.join(', ')}`
               : 'Véhicules proches visibles.',
         }
-      : null
+      : selectedPlace
+        ? {
+            title: selectedPlace.label,
+            subtitle: selectedPlace.address,
+            note: 'Lieu sélectionné. Tu peux l’enregistrer ou lancer un itinéraire.',
+          }
+        : null
 
   const handleSelectItem = (item: SearchItem | FavoriteItem) => {
     startTransition(() => {
       setSelectedItem(item)
+      setSelectedPlace(null)
+      setSurfaceMode('explore')
+      setSearchQuery(item.label)
+      setIsSearchExpanded(false)
       if (item.type === 'route') {
         setViewMode(item.mode)
       }
-      setSearchQuery('')
       if (isMobileViewport) {
-        setIsPanelOpen(false)
+        setIsSidebarOpen(false)
+      }
+    })
+  }
+
+  const handleSelectPlace = (place: ResolvedPlace) => {
+    startTransition(() => {
+      setSelectedPlace(place)
+      setSelectedItem(null)
+      setSurfaceMode('explore')
+      setSearchQuery(place.address)
+      setIsSearchExpanded(false)
+      if (isMobileViewport) {
+        setIsSidebarOpen(false)
+      }
+    })
+  }
+
+  const handleOpenRoute = (destination?: ResolvedPlace | SavedPlace | SearchItem) => {
+    startTransition(() => {
+      setSurfaceMode('route')
+      setSelectedItem(null)
+      setIsSearchExpanded(true)
+      setIsSidebarOpen(true)
+      if (destination) {
+        const place = toResolvedPlace(destination)
+        setRouteDestination(place)
+        setRouteDestinationQuery(place.address)
+        setActiveRouteField('origin')
+      } else {
+        setActiveRouteField(routeDestination ? 'origin' : 'destination')
       }
     })
   }
@@ -353,8 +712,24 @@ function App() {
   const handleClearSelection = () => {
     startTransition(() => {
       setSelectedItem(null)
-      if (viewMode !== 'combined') {
-        setViewMode(viewMode)
+      setSelectedPlace(null)
+      setSearchQuery('')
+      setSurfaceMode(session ? 'home' : 'explore')
+      if (bootstrap) {
+        setCameraRequest(
+          pinnedRouteFavorites.length > 0
+            ? buildRouteCameraRequest(
+                bootstrap,
+                pinnedRouteFavorites.map((favorite) => favorite.id),
+              )
+            : {
+                id: createRequestId('reset'),
+                kind: 'bounds',
+                points: bootstrap.shapes.flatMap((shape) => shape.coordinates),
+                padding: 52,
+                duration: 700,
+              },
+        )
       }
     })
   }
@@ -377,20 +752,41 @@ function App() {
     const nextFavorites = exists
       ? favorites.filter(
           (favorite) =>
-            !(
-              favorite.type === nextFavorite.type && favorite.id === nextFavorite.id
-            ),
+            !(favorite.type === nextFavorite.type && favorite.id === nextFavorite.id),
         )
-      : [nextFavorite, ...favorites].slice(0, 24)
+      : [nextFavorite, ...favorites].slice(0, 36)
 
-    setIsSavingFavorite(true)
+    await persistFavorites(nextFavorites)
+  }
+
+  const handleToggleFavoritePin = async (favorite: FavoriteItem) => {
+    if (!session?.token) {
+      openIdentity('login')
+      return
+    }
+
+    const nextFavorites = favorites.map((entry) =>
+      entry.type === favorite.type && entry.id === favorite.id
+        ? { ...entry, pinnedToMap: !entry.pinnedToMap }
+        : entry,
+    )
+    await persistFavorites(nextFavorites)
+  }
+
+  const persistFavorites = async (nextFavorites: FavoriteItem[]) => {
+    if (!session?.token) {
+      return
+    }
+
+    const previousFavorites = favorites
     setFavorites(nextFavorites)
+    setIsSavingFavorite(true)
 
     try {
       const response = await saveFavorites(session.token, nextFavorites)
       setFavorites(response.favorites)
     } catch (error) {
-      setFavorites(favorites)
+      setFavorites(previousFavorites)
       setAppError(
         error instanceof Error
           ? error.message
@@ -401,621 +797,773 @@ function App() {
     }
   }
 
-  const handlePlannerFieldChange = (
-    field: 'origin' | 'destination',
-    value: string,
-  ) => {
-    setPlannerActiveField(field)
-
-    if (field === 'origin') {
-      setPlannerOriginQuery(value)
-      if (plannerOrigin?.name !== value) {
-        setPlannerOrigin(null)
-      }
+  const persistProfile = async (nextProfile: UserProfile) => {
+    if (!session?.token) {
       return
     }
 
-    setPlannerDestinationQuery(value)
-    if (plannerDestination?.name !== value) {
-      setPlannerDestination(null)
+    const previousProfile = profile
+    setProfile(nextProfile)
+    setIsSavingProfile(true)
+
+    try {
+      const response = await saveProfile(session.token, nextProfile)
+      setProfile(response.profile)
+    } catch (error) {
+      setProfile(previousProfile)
+      setAppError(
+        error instanceof Error
+          ? error.message
+          : 'Impossible de mettre à jour le profil.',
+      )
+    } finally {
+      setIsSavingProfile(false)
     }
   }
 
-  const handlePlannerPick = (field: 'origin' | 'destination', item: SearchItem) => {
-    const station = toPlannerStation(item)
-    if (!station) {
+  const handleSaveDisplayName = async (value: string) => {
+    if (!session?.token) {
       return
     }
 
-    if (field === 'origin') {
-      setPlannerOrigin(station)
-      setPlannerOriginQuery(station.name)
-    } else {
-      setPlannerDestination(station)
-      setPlannerDestinationQuery(station.name)
-    }
-
-    setPlannerActiveField(null)
-  }
-
-  const handlePlannerUseSelectedStation = (field: 'origin' | 'destination') => {
-    if (!selectedPlannerStation) {
+    const trimmed = value.trim()
+    if (trimmed === profile.displayName) {
       return
     }
 
-    if (field === 'origin') {
-      setPlannerOrigin(selectedPlannerStation)
-      setPlannerOriginQuery(selectedPlannerStation.name)
-    } else {
-      setPlannerDestination(selectedPlannerStation)
-      setPlannerDestinationQuery(selectedPlannerStation.name)
+    await persistProfile({
+      ...profile,
+      displayName: trimmed,
+    })
+  }
+
+  const handleSaveSelectedPlace = async (kind: SavedPlace['kind']) => {
+    if (!session?.token) {
+      openIdentity('signup')
+      return
     }
 
-    setPlannerActiveField(null)
+    if (!selectedPlace) {
+      return
+    }
+
+    const nextPlace = toSavedPlace(selectedPlace, kind)
+    const basePlaces = profile.savedPlaces.filter((place) =>
+      kind === 'saved' ? place.id !== nextPlace.id : place.kind !== kind,
+    )
+
+    await persistProfile({
+      ...profile,
+      savedPlaces:
+        kind === 'saved'
+          ? [nextPlace, ...basePlaces].slice(0, 10)
+          : [nextPlace, ...basePlaces],
+    })
   }
 
-  const handlePlannerSwap = () => {
-    setPlannerOrigin(plannerDestination)
-    setPlannerDestination(plannerOrigin)
-    setPlannerOriginQuery(plannerDestination?.name ?? '')
-    setPlannerDestinationQuery(plannerOrigin?.name ?? '')
+  const handleDeleteSavedPlace = async (placeId: string) => {
+    if (!session?.token) {
+      return
+    }
+
+    await persistProfile({
+      ...profile,
+      savedPlaces: profile.savedPlaces.filter((place) => place.id !== placeId),
+    })
   }
+
+  const syncLocationPreference = async (preference: LocationPreference) => {
+    if (!session?.token) {
+      return
+    }
+
+    if (profile.locationPreference === preference) {
+      return
+    }
+
+    await persistProfile({
+      ...profile,
+      locationPreference: preference,
+    })
+  }
+
+  const requestCurrentLocation = async () => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setLocationHint('La géolocalisation n’est pas disponible sur cet appareil.')
+      return null
+    }
+
+    setIsLocating(true)
+    setLocationHint(null)
+
+    return new Promise<ResolvedPlace | null>((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const place = {
+            id: `coord:${position.coords.latitude.toFixed(6)},${position.coords.longitude.toFixed(6)}`,
+            label: CURRENT_LOCATION_PLACEHOLDER,
+            address: CURRENT_LOCATION_PLACEHOLDER,
+            placeType: 'coordinate',
+            relevance: 1,
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+          } satisfies ResolvedPlace
+
+          setCurrentLocation(place)
+          setBrowserLocationPreference('granted')
+          setLocationHint('Position actuelle prête.')
+          await syncLocationPreference('granted')
+          setIsLocating(false)
+          resolve(place)
+        },
+        async (error) => {
+          const nextPreference =
+            error.code === error.PERMISSION_DENIED
+              ? 'denied'
+              : 'prompt-dismissed'
+          setBrowserLocationPreference(nextPreference)
+          setLocationHint(
+            nextPreference === 'denied'
+              ? 'Accès à la localisation refusé.'
+              : 'La demande de localisation a été fermée ou interrompue.',
+          )
+          await syncLocationPreference(nextPreference)
+          setIsLocating(false)
+          resolve(null)
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 8000,
+          maximumAge: 30_000,
+        },
+      )
+    })
+  }
+
+  const handleUseCurrentLocationAsOrigin = async () => {
+    const place = currentLocation ?? (await requestCurrentLocation())
+    if (!place) {
+      return
+    }
+
+    setRouteOrigin(place)
+    setRouteOriginQuery(CURRENT_LOCATION_PLACEHOLDER)
+    setActiveRouteField('destination')
+  }
+
+  const handleRouteToSavedPlace = async (place: SavedPlace) => {
+    handleOpenRoute(place)
+    const location = currentLocation ?? (await requestCurrentLocation())
+    if (location) {
+      setRouteOrigin(location)
+      setRouteOriginQuery(CURRENT_LOCATION_PLACEHOLDER)
+      setRouteDestination(toResolvedPlace(place))
+      setRouteDestinationQuery(place.address)
+    }
+  }
+
+  const handleRoutePick = (field: RouteField, place: ResolvedPlace) => {
+    if (field === 'origin') {
+      setRouteOrigin(place)
+      setRouteOriginQuery(place.address)
+      setActiveRouteField('destination')
+      return
+    }
+
+    setRouteDestination(place)
+    setRouteDestinationQuery(place.address)
+    setActiveRouteField('origin')
+  }
+
+  const handleRouteSwap = () => {
+    setRouteOrigin(routeDestination)
+    setRouteDestination(routeOrigin)
+    setRouteOriginQuery(routeDestinationQuery)
+    setRouteDestinationQuery(routeOriginQuery)
+  }
+
+  const handleSelectItinerary = (itineraryId: string) => {
+    setSelectedItineraryId(itineraryId)
+  }
+
+  const searchPopoverVisible =
+    isSearchExpanded ||
+    surfaceMode === 'route' ||
+    Boolean(searchQuery.trim()) ||
+    searchSections.routes.length > 0 ||
+    searchSections.stations.length > 0 ||
+    searchSections.places.length > 0
 
   return (
-    <div className={`app-shell ${isPanelOpen ? 'panel-open' : 'panel-closed'}`}>
+    <div className={`app-shell ${isSidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
       <main className="map-panel">
         <MapView
           bootstrap={bootstrap}
           live={live}
           selectedItem={selectedItem}
+          selectedPlace={selectedPlace}
+          itinerary={selectedItinerary}
           viewMode={viewMode}
           mapStyle={mapStyle}
-          favoritesFocus={favoritesFocus}
+          routeFocusIds={routeFocusIds}
+          cameraRequest={cameraRequest}
           onSelectItem={handleSelectItem}
         />
 
-        {/* Map toolbar */}
-        <div className="map-toolbar">
-          <div className="toolbar-brand">
-            <strong>Transit Atlas</strong>
-            <span className={`freshness-dot ${live?.stale ? 'stale' : isFetchingLive ? 'updating' : 'fresh'}`} />
-          </div>
-
-          <div className="toolbar-actions">
-            {selectedItem ? (
-              <button className="toolbar-button subtle" onClick={handleClearSelection}>
-                Tout réafficher
-              </button>
-            ) : null}
-
-            <button
-              className="toolbar-button subtle icon-button"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              title={theme === 'dark' ? 'Mode clair' : 'Mode sombre'}
-            >
-              {theme === 'dark' ? '☀' : '◑'}
-            </button>
-
-            {styleOptions.length > 1 ? (
-              <button
-                className="toolbar-button subtle icon-button"
-                onClick={() => setMapStyle(mapStyle === 'streets' ? 'satellite' : 'streets')}
-                disabled={!styleOptions.find(o => o.id === 'satellite')?.available}
-                title={mapStyle === 'streets' ? 'Vue aérienne' : 'Vue 2D'}
-              >
-                {mapStyle === 'streets' ? '🛰' : '🗺'}
-              </button>
-            ) : null}
-
+        <div className={`floating-search ${searchPopoverVisible ? 'expanded' : ''}`}>
+          <div className="omnibox-row">
             {isMobileViewport ? (
               <button
-                className="toolbar-button primary"
-                onClick={() => setIsPanelOpen((open) => !open)}
+                className="chrome-button icon"
+                onClick={() => setIsSidebarOpen((open) => !open)}
+                aria-label="Ouvrir le panneau"
               >
-                {isPanelOpen ? 'Carte' : 'Menu'}
+                {isSidebarOpen ? '✕' : '☰'}
               </button>
             ) : null}
+
+            {surfaceMode === 'route' ? (
+              <button
+                className="chrome-button icon"
+                onClick={() => {
+                  setSurfaceMode(selectedItem || selectedPlace ? 'explore' : session ? 'home' : 'explore')
+                  setIsSearchExpanded(false)
+                }}
+                aria-label="Fermer le mode itinéraire"
+              >
+                ←
+              </button>
+            ) : (
+              <span className="search-leading">⌕</span>
+            )}
+
+            {surfaceMode === 'route' ? (
+              <div className="route-inline-summary">
+                <strong>Itinéraire</strong>
+                <small>
+                  {routeOrigin ? routeOrigin.label : 'Départ'} →{' '}
+                  {routeDestination ? routeDestination.label : 'Arrivée'}
+                </small>
+              </div>
+            ) : (
+              <input
+                className="omnibox-input"
+                value={searchQuery}
+                onFocus={() => {
+                  setIsSearchExpanded(true)
+                  setSurfaceMode(selectedItem || selectedPlace ? 'explore' : session ? 'home' : 'explore')
+                }}
+                onChange={(event) => {
+                  setSearchQuery(event.target.value)
+                  setIsSearchExpanded(true)
+                }}
+                placeholder="Ligne 80, Jean-Talon, 425 rue..."
+              />
+            )}
+
+            {surfaceMode !== 'route' && searchQuery ? (
+              <button
+                className="chrome-button icon subtle"
+                onClick={() => setSearchQuery('')}
+                aria-label="Effacer"
+              >
+                ✕
+              </button>
+            ) : null}
+
+            <button
+              className={`chrome-button ${surfaceMode === 'route' ? 'active' : ''}`}
+              onClick={() => handleOpenRoute(selectedPlace ?? undefined)}
+            >
+              Itinéraire
+            </button>
+
+            <button
+              className="chrome-button icon subtle"
+              onClick={() => setMapStyle(mapStyle === 'streets' ? 'satellite' : 'streets')}
+              disabled={!styleOptions.find((option) => option.id === 'satellite')?.available}
+              aria-label="Changer le style de carte"
+            >
+              {mapStyle === 'streets' ? '🛰' : '🗺'}
+            </button>
           </div>
+
+          {surfaceMode === 'route' ? (
+            <div className="search-panel route-panel">
+              <div className="route-fields">
+                <label className="route-field">
+                  <span>Départ</span>
+                  <input
+                    value={routeOriginQuery}
+                    onFocus={() => setActiveRouteField('origin')}
+                    onChange={(event) => {
+                      setRouteOriginQuery(event.target.value)
+                      setRouteOrigin(null)
+                      setActiveRouteField('origin')
+                    }}
+                    placeholder={CURRENT_LOCATION_PLACEHOLDER}
+                  />
+                </label>
+                <button className="swap-inline" onClick={handleRouteSwap} aria-label="Inverser">
+                  ⇅
+                </button>
+                <label className="route-field">
+                  <span>Arrivée</span>
+                  <input
+                    value={routeDestinationQuery}
+                    onFocus={() => setActiveRouteField('destination')}
+                    onChange={(event) => {
+                      setRouteDestinationQuery(event.target.value)
+                      setRouteDestination(null)
+                      setActiveRouteField('destination')
+                    }}
+                    placeholder="Choisir un lieu"
+                  />
+                </label>
+              </div>
+
+              <div className="route-chip-row">
+                <button className="small-chip" onClick={() => void handleUseCurrentLocationAsOrigin()}>
+                  {isLocating ? 'Localisation…' : CURRENT_LOCATION_PLACEHOLDER}
+                </button>
+                {homePlace ? (
+                  <button className="small-chip" onClick={() => handleRoutePick('destination', homePlace)}>
+                    Domicile
+                  </button>
+                ) : null}
+                {workPlace ? (
+                  <button className="small-chip" onClick={() => handleRoutePick('destination', workPlace)}>
+                    Travail
+                  </button>
+                ) : null}
+                {extraPlaces.slice(0, 3).map((place) => (
+                  <button
+                    key={place.id}
+                    className="small-chip"
+                    onClick={() => handleRoutePick('destination', place)}
+                  >
+                    {place.name}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mode-switch">
+                {(
+                  [
+                    ['transit', 'Transit'],
+                    ['walking', 'À pied'],
+                    ['cycling', 'Vélo'],
+                  ] as const
+                ).map(([modeId, label]) => (
+                  <button
+                    key={modeId}
+                    className={`mode-pill ${routeMode === modeId ? 'active' : ''}`}
+                    onClick={() => setRouteMode(modeId)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {effectiveRouteSuggestions.length > 0 ? (
+                <div className="search-section">
+                  <p className="section-eyebrow">
+                    {activeRouteField === 'origin' ? 'Suggestions départ' : 'Suggestions arrivée'}
+                  </p>
+                  <div className="stack-list">
+                    {effectiveRouteSuggestions.map((place) => (
+                      <button
+                        key={`${place.id}:${place.address}`}
+                        className="result-row"
+                        onClick={() => handleRoutePick(activeRouteField, place)}
+                      >
+                        <strong>{place.label}</strong>
+                        <small>{place.address}</small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : searchPopoverVisible ? (
+            <div className="search-panel">
+              {searchSections.routes.length > 0 ? (
+                <SearchSection title="Lignes">
+                  {searchSections.routes.map((item) => (
+                    <button
+                      key={`${item.type}:${item.id}`}
+                      className={`result-row ${
+                        selectedItem?.type === item.type && selectedItem.id === item.id ? 'active' : ''
+                      }`}
+                      onClick={() => handleSelectItem(item)}
+                    >
+                      <strong>{item.label}</strong>
+                      <small>{item.subtitle}</small>
+                    </button>
+                  ))}
+                </SearchSection>
+              ) : null}
+
+              {searchSections.stations.length > 0 ? (
+                <SearchSection title="Stations">
+                  {searchSections.stations.map((item) => (
+                    <button
+                      key={`${item.type}:${item.id}`}
+                      className={`result-row ${
+                        selectedItem?.type === item.type && selectedItem.id === item.id ? 'active' : ''
+                      }`}
+                      onClick={() => handleSelectItem(item)}
+                    >
+                      <strong>{item.label}</strong>
+                      <small>{item.subtitle}</small>
+                    </button>
+                  ))}
+                </SearchSection>
+              ) : null}
+
+              {searchSections.places.length > 0 ? (
+                <SearchSection title="Adresses">
+                  {searchSections.places.map((place) => (
+                    <button
+                      key={`${place.id}:${place.address}`}
+                      className="result-row"
+                      onClick={() => handleSelectPlace(place)}
+                    >
+                      <strong>{place.label}</strong>
+                      <small>{place.address}</small>
+                    </button>
+                  ))}
+                </SearchSection>
+              ) : null}
+
+              {isSearchingPlaces ? <p className="panel-copy">Recherche d’adresses…</p> : null}
+              {!isSearchingPlaces &&
+              deferredSearchQuery.trim() &&
+              searchSections.routes.length === 0 &&
+              searchSections.stations.length === 0 &&
+              searchSections.places.length === 0 ? (
+                <p className="panel-copy">Aucun résultat.</p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
-        {/* Map legend overlay */}
-        <div className="map-legend">
-          <span className="legend-item"><i className="dot dot-live" />Temps réel</span>
-          <span className="legend-item"><i className="dot dot-estimated" />Estimé</span>
-          <span className="legend-item"><i className="dot dot-status" />Statut</span>
-        </div>
-
-        {/* Contextual info overlay - simplified */}
-        {(selectedRoute || selectedStation || isBootstrapping) ? (
-          <div className="map-overlay">
-            <p className="overlay-title">
-              {selectedRoute
-                ? `Ligne ${selectedRoute.shortName}`
-                : selectedStation
-                  ? 'Station ciblée'
-                  : 'Chargement…'}
-            </p>
-            <p className="overlay-copy">
-              {selectedRoute
-                ? 'Tracé complet avec véhicules de la ligne.'
-                : selectedStation
-                  ? 'Correspondances et véhicules proches.'
-                  : 'Chargement du réseau de transport…'}
-            </p>
+        <div className="status-toast">
+          <div className="status-dot-wrap">
+            <span className={`status-dot ${live?.stale ? 'stale' : isFetchingLive ? 'updating' : 'fresh'}`} />
+            <strong>Montréal en direct</strong>
           </div>
-        ) : null}
+          <small>
+            {liveSummary.busRealtime} bus • {liveSummary.metroEstimated} métros • {liveSummary.remEstimated} REM
+          </small>
+        </div>
       </main>
 
-      {/* Sidebar / Bottom sheet */}
-      <aside className={`control-panel ${isPanelOpen ? 'open' : 'closed'}`}>
-        {/* Drag handle (mobile) */}
-        {isMobileViewport ? (
-          <div className="sheet-handle-row" onClick={() => setIsPanelOpen(o => !o)}>
-            <div className="sheet-handle" />
-          </div>
-        ) : null}
-
-        {/* 1. Header - simplified */}
-        <div className="panel-header">
+      <aside className={`workspace-sidebar ${isSidebarOpen ? 'open' : 'closed'}`}>
+        <div className="sidebar-header">
           <div>
-            <h1>Transit Atlas</h1>
-            <p className="header-subtitle">Montréal en direct</p>
+            <p className="brand-kicker">Transit Atlas</p>
+            <h1>Favoris, trajets et carte live</h1>
           </div>
-          {isMobileViewport ? (
+          {!isMobileViewport ? (
             <button
-              className="panel-close"
-              onClick={() => setIsPanelOpen(false)}
-              aria-label="Fermer le panneau"
+              className="chrome-button icon subtle"
+              onClick={() => setIsSidebarOpen((open) => !open)}
+              aria-label="Replier le panneau"
             >
-              ✕
+              {isSidebarOpen ? '←' : '→'}
             </button>
           ) : null}
         </div>
 
-        {/* 2. Favorites (HERO) */}
-        <section className="panel-card favorites-card">
-          <div className="card-header-inline">
-            <p className="card-title">★ Favoris</p>
+        <section className="sidebar-section account-section">
+          <div className="section-topline">
+            <p className="section-eyebrow">Compte</p>
             {session ? (
-              <button
-                className="text-action"
-                onClick={() => void logoutIdentity()}
-              >
-                {session.email ? session.email.split('@')[0] : 'Déconnexion'}
+              <button className="text-link" onClick={() => void logoutIdentity()}>
+                Déconnexion
               </button>
             ) : null}
           </div>
 
-          {favorites.length > 0 ? (
-            <div className="favorites-grid">
-              {favorites.map((favorite) => (
-                <button
-                  key={`${favorite.type}:${favorite.id}`}
-                  className={`favorite-chip mode-${favorite.mode}`}
-                  onClick={() => handleSelectItem(favorite)}
-                >
-                  <strong>{favorite.label}</strong>
-                  <small>{favorite.subtitle}</small>
-                </button>
-              ))}
-            </div>
+          {session ? (
+            <>
+              <label className="profile-field">
+                <span>Nom affiché</span>
+                <input
+                  defaultValue={profile.displayName || session.email?.split('@')[0] || ''}
+                  onBlur={(event) => void handleSaveDisplayName(event.target.value)}
+                  placeholder="Ton nom"
+                />
+              </label>
+              <p className="panel-copy">
+                {session.email ?? 'Compte connecté'}{isSavingProfile ? ' • sauvegarde…' : ''}
+              </p>
+            </>
           ) : (
-            <div className="favorites-empty">
-              {session ? (
-                <p className="small-copy">
-                  Cherche une ligne ou une station, puis ajoute-la avec ★
-                </p>
-              ) : (
-                <>
-                  <p className="small-copy">
-                    Connecte-toi pour retrouver tes lignes favorites dès l'ouverture.
-                  </p>
-                  <div className="auth-actions">
-                    <button
-                      className="secondary-action"
-                      onClick={() => openIdentity('login')}
-                    >
-                      Connexion
-                    </button>
-                    <button
-                      className="primary-action"
-                      onClick={() => openIdentity('signup')}
-                    >
-                      Créer un compte
-                    </button>
-                  </div>
-                </>
-              )}
+            <div className="auth-card">
+              <p className="panel-copy">
+                Connecte-toi pour enregistrer domicile, travail, favoris et préférences.
+              </p>
+              <div className="inline-actions">
+                <button className="secondary-button" onClick={() => openIdentity('login')}>
+                  Connexion
+                </button>
+                <button className="primary-button" onClick={() => openIdentity('signup')}>
+                  Créer un compte
+                </button>
+              </div>
             </div>
           )}
         </section>
 
-        {/* 3. Search */}
-        <section className="panel-card">
-          <div className="card-header-inline">
-            <label className="card-title" htmlFor="search-input">
-              Recherche
-            </label>
-            {searchQuery ? (
-              <button
-                className="text-action"
-                onClick={() => setSearchQuery('')}
-              >
-                Effacer
-              </button>
-            ) : null}
+        <section className="sidebar-section">
+          <div className="section-topline">
+            <p className="section-eyebrow">Localisation</p>
+            <span className={`permission-pill ${effectiveLocationPreference}`}>
+              {locationPreferenceLabel(effectiveLocationPreference)}
+            </span>
           </div>
-
-          <input
-            id="search-input"
-            className="search-input"
-            value={searchQuery}
-            onChange={(event) => {
-              setSearchQuery(event.target.value)
-              if (isMobileViewport) {
-                setIsPanelOpen(true)
-              }
-            }}
-            placeholder="Bus 24, ligne 2, Jean-Talon…"
-          />
-
-          {searchResults.length > 0 ? (
-            <div className="search-results">
-              {searchResults.map((item) => (
-                <button
-                  key={`${item.type}:${item.id}`}
-                  className={`search-result ${
-                    selectedItem?.type === item.type && selectedItem.id === item.id
-                      ? 'active'
-                      : ''
-                  }`}
-                  onClick={() => handleSelectItem(item)}
-                >
-                  <div className="search-result-top">
-                    <span>{item.label}</span>
-                    <span className={`result-badge ${item.mode}`}>
-                      {item.type === 'route'
-                        ? item.mode === 'bus'
-                          ? 'Bus'
-                          : item.mode === 'metro'
-                            ? 'Métro'
-                            : 'REM'
-                        : 'Station'}
-                    </span>
-                  </div>
-                  <small>{item.subtitle}</small>
-                </button>
-              ))}
-            </div>
-          ) : searchQuery.trim() ? (
-            <p className="small-copy">Aucun résultat.</p>
-          ) : null}
+          <div className="inline-actions">
+            <button className="secondary-button" onClick={() => void requestCurrentLocation()}>
+              {isLocating ? 'Localisation…' : 'Utiliser ma position'}
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            >
+              {theme === 'dark' ? 'Mode clair' : 'Mode sombre'}
+            </button>
+          </div>
+          {locationHint ? <p className="panel-copy">{locationHint}</p> : null}
         </section>
 
-        {/* 4. Mode filter */}
-        <section className="panel-card compact-card">
-          <span className="card-title">Modes</span>
-          <div className="segmented five-up">
+        {session ? (
+          <section className="sidebar-section">
+            <div className="section-topline">
+              <p className="section-eyebrow">Raccourcis</p>
+              <span className="panel-copy">{profile.savedPlaces.length} adresses</span>
+            </div>
+
+            <div className="saved-place-grid">
+              {homePlace ? (
+                <SavedPlaceCard
+                  place={homePlace}
+                  onRoute={() => void handleRouteToSavedPlace(homePlace)}
+                  onDelete={() => void handleDeleteSavedPlace(homePlace.id)}
+                />
+              ) : (
+                <PlaceholderCard title="Domicile" body="Enregistre une adresse depuis la recherche." />
+              )}
+
+              {workPlace ? (
+                <SavedPlaceCard
+                  place={workPlace}
+                  onRoute={() => void handleRouteToSavedPlace(workPlace)}
+                  onDelete={() => void handleDeleteSavedPlace(workPlace.id)}
+                />
+              ) : (
+                <PlaceholderCard title="Travail" body="Ajoute ton travail pour lancer un trajet en un geste." />
+              )}
+            </div>
+
+            {extraPlaces.length > 0 ? (
+              <div className="stack-list compact-stack">
+                {extraPlaces.map((place) => (
+                  <SavedPlaceListItem
+                    key={place.id}
+                    place={place}
+                    onRoute={() => void handleRouteToSavedPlace(place)}
+                    onDelete={() => void handleDeleteSavedPlace(place.id)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {selectionCard ? (
+          <section className="sidebar-section selection-section">
+            <div className="section-topline">
+              <p className="section-eyebrow">
+                {surfaceMode === 'route' ? 'Itinéraire' : 'Exploration'}
+              </p>
+              <button className="text-link" onClick={handleClearSelection}>
+                Effacer
+              </button>
+            </div>
+
+            <div className="selection-headline">
+              <h2>{selectionCard.title}</h2>
+              <p>{selectionCard.subtitle}</p>
+            </div>
+            <p className="panel-copy">{selectionCard.note}</p>
+
+            <div className="inline-actions">
+              {selectedItem ? (
+                <button className="primary-button" onClick={() => void handleToggleFavorite()}>
+                  {selectedFavorite
+                    ? isSavingFavorite
+                      ? 'Mise à jour…'
+                      : 'Retirer des favoris'
+                    : 'Ajouter aux favoris'}
+                </button>
+              ) : null}
+              {selectedPlace ? (
+                <button className="primary-button" onClick={() => handleOpenRoute(selectedPlace)}>
+                  Itinéraire
+                </button>
+              ) : null}
+              {selectedPlace && session ? (
+                <>
+                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('home')}>
+                    Enregistrer en domicile
+                  </button>
+                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('work')}>
+                    Enregistrer en travail
+                  </button>
+                  <button className="ghost-button" onClick={() => void handleSaveSelectedPlace('saved')}>
+                    Enregistrer
+                  </button>
+                </>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {surfaceMode === 'route' ? (
+          <section className="sidebar-section itinerary-section">
+            <div className="section-topline">
+              <p className="section-eyebrow">Résultats</p>
+              <span className="panel-copy">
+                {routeMode === 'transit'
+                  ? 'Bus, métro, REM'
+                  : routeMode === 'walking'
+                    ? 'Marche'
+                    : 'Vélo et BIXI'}
+              </span>
+            </div>
+
+            {isPlanning ? <p className="panel-copy">Calcul des itinéraires…</p> : null}
+            {planError ? <p className="panel-copy">{planError}</p> : null}
+            {!isPlanning && !planError && selectedItinerary ? (
+              <div className="stack-list">
+                {planItineraries.map((itinerary) => (
+                  <button
+                    key={itinerary.id}
+                    className={`itinerary-card ${
+                      selectedItinerary?.id === itinerary.id ? 'active' : ''
+                    }`}
+                    onClick={() => handleSelectItinerary(itinerary.id)}
+                  >
+                    <div className="itinerary-topline">
+                      <strong>{itinerary.summary}</strong>
+                      <span>{itinerary.durationMin} min</span>
+                    </div>
+                    <p>
+                      {formatDistanceKm(itinerary.distanceKm)} •{' '}
+                      {itinerary.transfers} correspondance
+                      {itinerary.transfers > 1 ? 's' : ''}
+                    </p>
+                    <div className="mini-steps">
+                      {itinerary.segments.slice(0, 4).map((segment) => (
+                        <span key={segment.id} className={`mini-step mode-${segment.mode}`}>
+                          {segment.label}
+                        </span>
+                      ))}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {selectedItinerary ? (
+              <div className="stack-list step-stack">
+                {selectedItinerary.segments.map((segment) => (
+                  <div key={segment.id} className={`step-card mode-${segment.mode}`}>
+                    <div className="itinerary-topline">
+                      <strong>{segment.label}</strong>
+                      <span>{segment.durationMin} min</span>
+                    </div>
+                    <p>
+                      {segment.from.label} → {segment.to.label}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {planWarnings.map((warning) => (
+              <p key={warning} className="panel-copy">
+                {warning}
+              </p>
+            ))}
+          </section>
+        ) : null}
+
+        <section className="sidebar-section">
+          <div className="section-topline">
+            <p className="section-eyebrow">Favoris live</p>
+            <span className="panel-copy">{pinnedRouteFavorites.length} épinglé(s)</span>
+          </div>
+
+          {favorites.length > 0 ? (
+            <div className="stack-list">
+              {favorites.map((favorite) => (
+                <FavoriteRow
+                  key={`${favorite.type}:${favorite.id}`}
+                  favorite={favorite}
+                  live={live}
+                  onFocus={() => handleSelectItem(favorite)}
+                  onTogglePin={() => void handleToggleFavoritePin(favorite)}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="panel-copy">
+              {session
+                ? 'Ajoute une ligne ou une station à tes favoris depuis la carte.'
+                : 'Connecte-toi pour retrouver tes lignes favorites dès l’ouverture.'}
+            </p>
+          )}
+        </section>
+
+        <section className="sidebar-section compact-controls">
+          <div className="section-topline">
+            <p className="section-eyebrow">Carte</p>
+            <span className="panel-copy">{serviceStatusSummary}</span>
+          </div>
+          <div className="mode-switch view-switch">
             {(
               [
                 ['combined', 'Tous'],
                 ['bus', 'Bus'],
                 ['metro', 'Métro'],
                 ['rem', 'REM'],
-                ['bixi', 'BIXI'],
               ] as const
-            ).map(([id, label]) => (
+            ).map(([modeId, label]) => (
               <button
-                key={id}
-                className={`segment ${viewMode === id ? 'active' : ''} ${id === 'bixi' ? 'bixi-segment' : ''}`}
-                onClick={() => {
-                  if (id === 'bixi') return
-                  startTransition(() => {
-                    setViewMode(id as ViewMode)
-                    if (
-                      selectedItem?.type === 'route' &&
-                      selectedItem.mode !== id &&
-                      id !== 'combined'
-                    ) {
-                      setSelectedItem(null)
-                    }
-                  })
-                }}
-                disabled={id === 'bixi'}
+                key={modeId}
+                className={`mode-pill ${viewMode === modeId ? 'active' : ''}`}
+                onClick={() => setViewMode(modeId)}
               >
                 {label}
-                {id === 'bixi' ? <span className="coming-soon-badge">Bientôt</span> : null}
               </button>
             ))}
           </div>
         </section>
 
-        {/* 5. Selection card - only when selected */}
-        {selectionCard ? (
-          <section className="panel-card selection-card">
-            <div className="card-header-inline">
-              <div>
-                <h2>{selectionCard.title}</h2>
-                <p className="small-copy">{selectionCard.subtitle}</p>
-              </div>
-              <div className="selection-header-actions">
-                <button
-                  className="icon-action star-button"
-                  onClick={() => void handleToggleFavorite()}
-                  disabled={isSavingFavorite}
-                  title={selectedFavorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
-                >
-                  {selectedFavorite ? '★' : '☆'}
-                </button>
-                <button className="text-action" onClick={handleClearSelection}>
-                  ✕
-                </button>
-              </div>
-            </div>
-            <p className="small-copy selection-note">{selectionCard.note}</p>
-          </section>
-        ) : null}
-
-        {/* 6. Planner */}
-        <section className="panel-card planner-card">
-          <p className="card-title">Planificateur</p>
-
-          <div className="segmented three-up planner-mode-switch">
-            {(
-              [
-                ['transit', '🚇', 'Transport'],
-                ['walking', '🚶', 'À pied'],
-                ['bixi', '🚲', 'BIXI'],
-              ] as const
-            ).map(([id, icon, label]) => (
-              <button
-                key={id}
-                className={`segment ${plannerMode === id ? 'active' : ''} ${id === 'bixi' ? 'bixi-segment' : ''}`}
-                onClick={() => setPlannerMode(id)}
-                disabled={id === 'bixi'}
-              >
-                <span className="segment-icon">{icon}</span>
-                {label}
-                {id === 'bixi' ? <span className="coming-soon-badge">Bientôt</span> : null}
-              </button>
-            ))}
-          </div>
-
-          <div className="planner-fields-wrapper">
-            <div className="planner-timeline">
-              <span className="timeline-dot origin-dot" />
-              <span className="timeline-line" />
-              <span className="timeline-dot destination-dot" />
-            </div>
-
-            <div className="planner-fields">
-              <div className="planner-field">
-                <label className="field-label" htmlFor="planner-origin">
-                  Départ
-                </label>
-                <input
-                  id="planner-origin"
-                  className="search-input"
-                  value={plannerOriginQuery}
-                  onFocus={() => setPlannerActiveField('origin')}
-                  onChange={(event) =>
-                    handlePlannerFieldChange('origin', event.target.value)
-                  }
-                  placeholder="Choisir une station"
-                />
-              </div>
-
-              <button
-                className="swap-button"
-                onClick={handlePlannerSwap}
-                title="Inverser départ et arrivée"
-              >
-                ⇅
-              </button>
-
-              <div className="planner-field">
-                <label className="field-label" htmlFor="planner-destination">
-                  Arrivée
-                </label>
-                <input
-                  id="planner-destination"
-                  className="search-input"
-                  value={plannerDestinationQuery}
-                  onFocus={() => setPlannerActiveField('destination')}
-                  onChange={(event) =>
-                    handlePlannerFieldChange('destination', event.target.value)
-                  }
-                  placeholder="Choisir une station"
-                />
-              </div>
-            </div>
-          </div>
-
-          {selectedPlannerStation ? (
-            <div className="planner-shortcuts">
-              <button
-                className="secondary-action"
-                onClick={() => handlePlannerUseSelectedStation('origin')}
-              >
-                Départ = {selectedPlannerStation.name}
-              </button>
-              <button
-                className="secondary-action"
-                onClick={() => handlePlannerUseSelectedStation('destination')}
-              >
-                Arrivée = {selectedPlannerStation.name}
-              </button>
-            </div>
-          ) : null}
-
-          {plannerSuggestions.length > 0 ? (
-            <div className="search-results planner-results">
-              {plannerSuggestions.map((item) => (
-                <button
-                  key={`planner:${item.id}`}
-                  className="search-result"
-                  onClick={() =>
-                    handlePlannerPick(plannerActiveField ?? 'origin', item)
-                  }
-                >
-                  <div className="search-result-top">
-                    <span>{item.label}</span>
-                    <span className={`result-badge ${item.mode}`}>Station</span>
-                  </div>
-                  <small>{item.subtitle}</small>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {plannerMode === 'bixi' ? (
-            <div className="planner-bixi-placeholder">
-              <p className="small-copy">
-                Le calcul d'itinéraire BIXI sera bientôt disponible.
-              </p>
-            </div>
-          ) : plannerResult ? (
-            <div className="planner-result">
-              <div className="planner-summary">
-                <div className="planner-duration">
-                  <strong>{plannerResult.durationMin}</strong>
-                  <span>min</span>
-                </div>
-                <span className="planner-details">
-                  {formatDistanceKm(plannerResult.distanceKm)} •{' '}
-                  {plannerMode === 'transit'
-                    ? `${plannerResult.transfers} correspondance${plannerResult.transfers > 1 ? 's' : ''}`
-                    : 'marche estimée'}
-                </span>
-              </div>
-
-              <div className="planner-steps">
-                {plannerResult.segments.length > 0 ? (
-                  plannerResult.segments.map((segment, index) => (
-                    <div
-                      key={`${segment.label}:${index}`}
-                      className={`planner-step step-${segment.mode} ${segment.kind === 'walk' ? 'step-walk' : ''}`}
-                    >
-                      <div className="planner-step-top">
-                        <strong>{segment.label}</strong>
-                        <span>{segment.durationMin} min</span>
-                      </div>
-                      <p>
-                        {segment.from} → {segment.to}
-                        {segment.kind === 'ride' && segment.stops
-                          ? ` • ${segment.stops} arrêt${segment.stops > 1 ? 's' : ''}`
-                          : ''}
-                      </p>
-                    </div>
-                  ))
-                ) : (
-                  <p className="small-copy">Départ et arrivée identiques.</p>
-                )}
-              </div>
-
-              {plannerResult.warnings.map((warning) => (
-                <p key={warning} className="small-copy planner-note">
-                  {warning}
-                </p>
-              ))}
-            </div>
-          ) : plannerOrigin && plannerDestination ? (
-            <p className="small-copy">
-              Aucun trajet trouvé. Essaie un autre mode ou d'autres stations.
-            </p>
-          ) : (
-            <p className="small-copy">
-              Choisis un départ et une arrivée.
-            </p>
-          )}
-        </section>
-
-        {/* 7. Service status - collapsed */}
-        <section className="panel-card collapsible-card">
-          <button
-            className="collapsible-header"
-            onClick={() => setServiceStatusOpen(open => !open)}
-          >
-            <div>
-              <p className="card-title">État du service</p>
-              <p className="small-copy">{serviceStatusSummary}</p>
-            </div>
-            <span className={`chevron ${serviceStatusOpen ? 'open' : ''}`}>›</span>
-          </button>
-
-          {serviceStatusOpen ? (
-            <div className="state-list">
-              {visibleServiceStates.length > 0 ? (
-                visibleServiceStates.map((state) => (
-                  <ServiceStateCard key={`${state.mode}:${state.routeId}`} state={state} />
-                ))
-              ) : (
-                <p className="small-copy">Aucune alerte en cours.</p>
-              )}
-            </div>
-          ) : null}
-        </section>
-
-        {/* 8. Tech stats - collapsed */}
-        <section className="panel-card collapsible-card">
-          <button
-            className="collapsible-header"
-            onClick={() => setTechStatsOpen(open => !open)}
-          >
-            <div>
-              <p className="card-title">Statistiques</p>
-              <p className="small-copy">
-                {liveSummary.busRealtime} bus • {liveSummary.metroEstimated} métros • {liveSummary.remEstimated} REM
-              </p>
-            </div>
-            <span className={`chevron ${techStatsOpen ? 'open' : ''}`}>›</span>
-          </button>
-
-          {techStatsOpen ? (
-            <div className="tech-stats-content">
-              <div className="status-row">
-                <span className={`pill ${isFetchingLive ? 'ghost' : 'ok'}`}>
-                  {isFetchingLive ? 'Mise à jour…' : 'Live actif'}
-                </span>
-                <span className={`pill ${live?.stale ? 'warn' : 'ok'}`}>
-                  {live?.stale ? 'Données périmées' : 'Flux à jour'}
-                </span>
-              </div>
-
-              <div className="summary-grid">
-                <div className="summary-metric">
-                  <strong>{liveSummary.busRealtime}</strong>
-                  <span>bus suivis</span>
-                </div>
-                <div className="summary-metric">
-                  <strong>{liveSummary.metroEstimated}</strong>
-                  <span>métros estimés</span>
-                </div>
-                <div className="summary-metric">
-                  <strong>{liveSummary.remEstimated}</strong>
-                  <span>REM estimés</span>
-                </div>
-                <div className="summary-metric">
-                  <strong>{totalVisibleEntities}</strong>
-                  <span>points visibles</span>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </section>
-
-        {/* 9. Alerts */}
         {(appError || live?.warnings.length || bootstrap?.warnings.length) && (
-          <section className="panel-card alert-card">
-            <p className="card-title">Attention</p>
-            {appError ? <p className="small-copy">{appError}</p> : null}
+          <section className="sidebar-section alert-section">
+            <p className="section-eyebrow">Informations</p>
+            {appError ? <p className="panel-copy">{appError}</p> : null}
             {bootstrap?.warnings.map((warning) => (
-              <p key={warning} className="small-copy">
+              <p key={warning} className="panel-copy">
                 {warning}
               </p>
             ))}
             {live?.warnings.map((warning) => (
-              <p key={warning} className="small-copy">
+              <p key={warning} className="panel-copy">
                 {warning}
               </p>
             ))}
@@ -1026,44 +1574,130 @@ function App() {
   )
 }
 
-function filterServiceStates(
-  serviceStates: ServiceState[],
-  viewMode: ViewMode,
-  selectedItem: SearchItem | FavoriteItem | null,
-  bootstrap: BootstrapResponse | null,
-) {
-  if (selectedItem?.type === 'route') {
-    return serviceStates.filter((state) => state.routeId === selectedItem.id)
-  }
+function SearchSection({
+  title,
+  children,
+}: {
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <div className="search-section">
+      <p className="section-eyebrow">{title}</p>
+      <div className="stack-list">{children}</div>
+    </div>
+  )
+}
 
-  if (selectedItem?.type === 'station' && bootstrap) {
-    const selectedStation = bootstrap.stations.find((station) => station.id === selectedItem.id)
-    const selectedStationRoutes = new Set(selectedStation?.routeIds ?? [])
-    return serviceStates.filter((state) => selectedStationRoutes.has(state.routeId))
-  }
+function FavoriteRow({
+  favorite,
+  live,
+  onFocus,
+  onTogglePin,
+}: {
+  favorite: FavoriteItem
+  live: LiveResponse | null
+  onFocus: () => void
+  onTogglePin: () => void
+}) {
+  const entityCount = live?.entities.filter((entity) => entity.routeId === favorite.id).length ?? 0
+  const state = live?.serviceStates.find((serviceState) => serviceState.routeId === favorite.id)
 
-  if (viewMode === 'combined') {
-    const nonBus = serviceStates.filter((state) => state.mode !== 'bus')
-    const busWarnings = serviceStates
-      .filter((state) => state.mode === 'bus')
-      .slice(0, 8)
+  return (
+    <div className={`favorite-row mode-${favorite.mode}`}>
+      <button className="favorite-main" onClick={onFocus}>
+        <strong>{favorite.label}</strong>
+        <small>{favorite.subtitle}</small>
+        <span className="favorite-meta">
+          {entityCount} véhicule{entityCount > 1 ? 's' : ''}
+          {state ? ` • ${serviceStatusLabel(state.status)}` : ''}
+        </span>
+      </button>
+      {favorite.type === 'route' ? (
+        <button className={`pin-toggle ${favorite.pinnedToMap ? 'active' : ''}`} onClick={onTogglePin}>
+          {favorite.pinnedToMap ? 'Épinglé' : 'Afficher'}
+        </button>
+      ) : null}
+    </div>
+  )
+}
 
-    return [...nonBus, ...busWarnings]
-  }
+function SavedPlaceCard({
+  place,
+  onRoute,
+  onDelete,
+}: {
+  place: SavedPlace
+  onRoute: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="saved-card">
+      <div>
+        <strong>{place.name}</strong>
+        <small>{place.address}</small>
+      </div>
+      <div className="inline-actions">
+        <button className="secondary-button" onClick={onRoute}>
+          Y aller
+        </button>
+        <button className="ghost-button" onClick={onDelete}>
+          Retirer
+        </button>
+      </div>
+    </div>
+  )
+}
 
-  if (viewMode === 'bixi') {
-    return []
-  }
+function SavedPlaceListItem({
+  place,
+  onRoute,
+  onDelete,
+}: {
+  place: SavedPlace
+  onRoute: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="saved-list-item">
+      <button className="saved-list-main" onClick={onRoute}>
+        <strong>{place.name}</strong>
+        <small>{place.address}</small>
+      </button>
+      <button className="ghost-button" onClick={onDelete}>
+        Retirer
+      </button>
+    </div>
+  )
+}
 
-  return serviceStates.filter((state) => state.mode === viewMode)
+function PlaceholderCard({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="saved-card placeholder">
+      <strong>{title}</strong>
+      <small>{body}</small>
+    </div>
+  )
 }
 
 function deriveModes(
   viewMode: ViewMode,
   selectedItem: SearchItem | FavoriteItem | null,
+  itinerary: Itinerary | null,
 ): TransportMode[] {
   if (selectedItem?.type === 'route') {
     return [selectedItem.mode]
+  }
+
+  if (itinerary?.mode === 'transit') {
+    const rideModes = itinerary.segments
+      .filter((segment) => segment.kind === 'ride')
+      .map((segment) => segment.mode)
+      .filter((mode): mode is TransportMode => mode === 'bus' || mode === 'metro' || mode === 'rem')
+
+    return rideModes.length > 0
+      ? uniqueTransportModes(rideModes)
+      : (['bus', 'metro', 'rem'] satisfies TransportMode[])
   }
 
   if (viewMode === 'combined' || viewMode === 'bixi') {
@@ -1074,19 +1708,81 @@ function deriveModes(
 }
 
 function toFavoriteItem(item: SearchItem | FavoriteItem): FavoriteItem {
-  if ('subtitle' in item && 'type' in item) {
+  if ('pinnedToMap' in item) {
+    return item
+  }
+
+  return {
+    type: item.type,
+    id: item.id,
+    mode: item.mode,
+    label: item.label,
+    subtitle: item.subtitle,
+    lat: item.lat,
+    lon: item.lon,
+    pinnedToMap: item.type === 'route',
+  }
+}
+
+function toSavedPlace(place: ResolvedPlace, kind: SavedPlace['kind']): SavedPlace {
+  return {
+    ...place,
+    kind,
+    name:
+      kind === 'home'
+        ? 'Domicile'
+        : kind === 'work'
+          ? 'Travail'
+          : place.label,
+  }
+}
+
+function toResolvedPlace(
+  place: ResolvedPlace | SavedPlace | SearchItem,
+): ResolvedPlace {
+  if ('address' in place) {
     return {
-      type: item.type,
-      id: item.id,
-      mode: item.mode,
-      label: item.label,
-      subtitle: item.subtitle,
-      lat: item.lat,
-      lon: item.lon,
+      id: place.id,
+      label: place.label,
+      address: place.address,
+      placeType: place.placeType,
+      relevance: place.relevance,
+      lat: place.lat,
+      lon: place.lon,
     }
   }
 
-  return item
+  return {
+    id: `${place.type}:${place.id}`,
+    label: place.label,
+    address: place.subtitle,
+    placeType: place.type,
+    relevance: 1,
+    lat: place.lat,
+    lon: place.lon,
+  }
+}
+
+function buildRouteCameraRequest(
+  bootstrap: BootstrapResponse,
+  routeIds: string[],
+): MapCameraRequest {
+  const routeIdSet = new Set(routeIds)
+  const points = bootstrap.shapes
+    .filter((shape) => routeIdSet.has(shape.routeId))
+    .flatMap((shape) => shape.coordinates)
+
+  return {
+    id: createRequestId('route'),
+    kind: 'bounds',
+    points: points.length > 0
+      ? points
+      : bootstrap.routes
+          .filter((route) => routeIdSet.has(route.id))
+          .map((route) => route.center),
+    padding: 96,
+    duration: 760,
+  }
 }
 
 function summarizeLiveEntities(entities: LiveEntity[]) {
@@ -1115,33 +1811,20 @@ function summarizeLiveEntities(entities: LiveEntity[]) {
 }
 
 function summarizeServiceStates(states: ServiceState[]) {
-  const warnings = states.filter(s => s.status === 'warning' || s.status === 'interruption')
-  const normal = states.filter(s => s.status === 'normal')
-  if (warnings.length === 0 && normal.length === 0) return 'Aucune donnée'
-  if (warnings.length === 0) return `${normal.length} ligne${normal.length > 1 ? 's' : ''} normale${normal.length > 1 ? 's' : ''}`
-  return `${warnings.length} alerte${warnings.length > 1 ? 's' : ''}`
-}
-
-function formatDistanceKm(distanceKm: number) {
-  return `${distanceKm.toFixed(distanceKm >= 10 ? 0 : 1)} km`
-}
-
-function ServiceStateCard({ state }: { state: ServiceState }) {
-  return (
-    <div className={`service-state ${state.status}`}>
-      <div className="service-state-top">
-        <strong>
-          {state.mode === 'bus'
-            ? `Bus ${state.routeId}`
-            : state.mode === 'metro'
-              ? `Ligne ${state.routeId}`
-              : `REM ${state.routeId.replace(/^S/, 'A')}`}
-        </strong>
-        <span>{serviceStatusLabel(state.status)}</span>
-      </div>
-      <p>{state.message}</p>
-    </div>
+  const warnings = states.filter(
+    (state) => state.status === 'warning' || state.status === 'interruption',
   )
+  const normal = states.filter((state) => state.status === 'normal')
+
+  if (warnings.length === 0 && normal.length === 0) {
+    return 'Aucune donnée'
+  }
+
+  if (warnings.length === 0) {
+    return `${normal.length} ligne${normal.length > 1 ? 's' : ''} normale${normal.length > 1 ? 's' : ''}`
+  }
+
+  return `${warnings.length} alerte${warnings.length > 1 ? 's' : ''}`
 }
 
 function serviceStatusLabel(status: ServiceState['status']) {
@@ -1149,6 +1832,35 @@ function serviceStatusLabel(status: ServiceState['status']) {
   if (status === 'interruption') return 'Interruption'
   if (status === 'warning') return 'À surveiller'
   return 'Inconnu'
+}
+
+function permissionStateToPreference(state: PermissionState): LocationPreference {
+  if (state === 'granted') return 'granted'
+  if (state === 'denied') return 'denied'
+  return 'unknown'
+}
+
+function locationPreferenceLabel(preference: LocationPreference) {
+  if (preference === 'granted') return 'Autorisée'
+  if (preference === 'denied') return 'Refusée'
+  if (preference === 'prompt-dismissed') return 'À confirmer'
+  return 'Non définie'
+}
+
+function formatDistanceKm(distanceKm: number) {
+  return `${distanceKm.toFixed(distanceKm >= 10 ? 0 : 1)} km`
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function uniqueTransportModes(values: TransportMode[]) {
+  return Array.from(new Set(values))
+}
+
+function createRequestId(prefix: string) {
+  return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
 }
 
 export default App

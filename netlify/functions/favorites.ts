@@ -95,7 +95,13 @@ function sanitizeFavorites(input: unknown[]) {
       continue
     }
 
-    deduped.set(`${favorite.type}:${favorite.id}`, favorite)
+    deduped.set(`${favorite.type}:${favorite.id}`, {
+      ...favorite,
+      pinnedToMap:
+        typeof favorite.pinnedToMap === 'boolean'
+          ? favorite.pinnedToMap
+          : favorite.type === 'route',
+    })
   }
 
   return Array.from(deduped.values())

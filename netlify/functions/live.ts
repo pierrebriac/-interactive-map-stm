@@ -11,6 +11,10 @@ export const config: Config = {
 
 export const handler: Handler = async (event) => {
   const modesParam = event.queryStringParameters?.modes
+  const routeIds = (event.queryStringParameters?.routeIds ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
   const modes = modesParam
     ? modesParam
         .split(',')
@@ -23,7 +27,7 @@ export const handler: Handler = async (event) => {
   try {
     const data = await getLiveData({
       modes: modes.length > 0 ? modes : ALL_MODES,
-      routeId: event.queryStringParameters?.routeId ?? null,
+      routeIds,
       stationId: event.queryStringParameters?.stationId ?? null,
     })
 

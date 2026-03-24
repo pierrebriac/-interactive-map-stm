@@ -2,9 +2,9 @@ import type { Config, Handler } from '@netlify/functions'
 import { buildPlan } from './lib/trip-planner.ts'
 import { errorResponse, jsonResponse } from './lib/http.ts'
 
-type PlannerMode = 'walking' | 'transit' | 'bixi'
+type PlannerMode = 'walking' | 'transit' | 'bixi' | 'cycling'
 
-const ALL_MODES: PlannerMode[] = ['walking', 'transit', 'bixi']
+const ALL_MODES: PlannerMode[] = ['walking', 'transit', 'cycling', 'bixi']
 
 export const config: Config = {
   path: '/api/plan',

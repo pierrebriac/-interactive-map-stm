@@ -10,12 +10,14 @@ import maplibregl, {
   type GeoJSONSourceSpecification,
   type Map,
 } from 'maplibre-gl'
-import { computeBounds } from '../shared/geo.ts'
 import type {
   BootstrapResponse,
   FavoriteItem,
+  Itinerary,
+  LiveEntity,
   LiveResponse,
   MapStyle,
+  ResolvedPlace,
   RouteSummary,
   SearchItem,
   ShapeFeature,
@@ -24,13 +26,32 @@ import type {
 } from '../shared/types.ts'
 import { getMapStyle } from '../lib/map-style.ts'
 
+export type MapCameraRequest =
+  | {
+      id: string
+      kind: 'bounds'
+      points: [number, number][]
+      padding?: number
+      duration?: number
+    }
+  | {
+      id: string
+      kind: 'center'
+      center: [number, number]
+      zoom: number
+      duration?: number
+    }
+
 interface MapViewProps {
   bootstrap: BootstrapResponse | null
   live: LiveResponse | null
   selectedItem: SearchItem | FavoriteItem | null
+  selectedPlace: ResolvedPlace | null
+  itinerary: Itinerary | null
   viewMode: ViewMode
   mapStyle: MapStyle
-  favoritesFocus: FavoriteItem[]
+  routeFocusIds: string[]
+  cameraRequest: MapCameraRequest | null
   onSelectItem: (item: SearchItem) => void
 }
 
@@ -43,23 +64,41 @@ export function MapView({
   bootstrap,
   live,
   selectedItem,
+  selectedPlace,
+  itinerary,
   viewMode,
   mapStyle,
-  favoritesFocus,
+  routeFocusIds,
+  cameraRequest,
   onSelectItem,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Map | null>(null)
-  const fittedInitialBoundsRef = useRef(false)
-  const userHasInteractedRef = useRef(false)
+  const initialStyleRef = useRef<MapStyle>(mapStyle)
   const activeStyleRef = useRef<MapStyle>(mapStyle)
-  const bootstrapRef = useRef<BootstrapResponse | null>(bootstrap)
-  const onSelectItemRef = useRef(onSelectItem)
+  const latestRef = useRef({
+    bootstrap,
+    live,
+    selectedItem,
+    selectedPlace,
+    itinerary,
+    viewMode,
+    routeFocusIds,
+    onSelectItem,
+  })
 
   useEffect(() => {
-    bootstrapRef.current = bootstrap
-    onSelectItemRef.current = onSelectItem
-  }, [bootstrap, onSelectItem])
+    latestRef.current = {
+      bootstrap,
+      live,
+      selectedItem,
+      selectedPlace,
+      itinerary,
+      viewMode,
+      routeFocusIds,
+      onSelectItem,
+    }
+  }, [bootstrap, live, onSelectItem, itinerary, routeFocusIds, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -68,30 +107,64 @@ export function MapView({
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: getMapStyle(mapStyle),
+      style: getMapStyle(initialStyleRef.current),
       center: [-73.58, 45.52],
       zoom: 10.4,
       attributionControl: false,
     })
 
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right')
+    const syncMapData = () => {
+      const current = latestRef.current
+      const routeSource = map.getSource('routes') as GeoJSONSource | undefined
+      const stationSource = map.getSource('stations') as GeoJSONSource | undefined
+      const busSource = map.getSource('buses') as GeoJSONSource | undefined
+      const railSource = map.getSource('rail-vehicles') as GeoJSONSource | undefined
+      const itinerarySource = map.getSource('itinerary-lines') as GeoJSONSource | undefined
+      const itineraryPointSource = map.getSource('itinerary-points') as GeoJSONSource | undefined
+      const placeSource = map.getSource('selected-place') as GeoJSONSource | undefined
+
+      if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource) {
+        return
+      }
+
+      routeSource.setData(
+        buildRouteCollection(
+          current.bootstrap,
+          current.viewMode,
+          current.selectedItem,
+          current.routeFocusIds,
+        ),
+      )
+      stationSource.setData(
+        buildStationCollection(current.bootstrap, current.viewMode, current.selectedItem),
+      )
+      busSource.setData(
+        buildBusCollection(current.live, current.selectedItem, current.routeFocusIds),
+      )
+      railSource.setData(
+        buildRailCollection(current.live, current.selectedItem, current.routeFocusIds),
+      )
+      itinerarySource.setData(buildItineraryCollection(current.itinerary))
+      itineraryPointSource.setData(buildItineraryPointCollection(current.itinerary))
+      placeSource.setData(buildSelectedPlaceCollection(current.selectedPlace))
+    }
 
     const selectRouteById = (routeId: string) => {
-      const route = bootstrapRef.current?.routes.find((entry) => entry.id === routeId)
+      const route = latestRef.current.bootstrap?.routes.find((entry) => entry.id === routeId)
       if (!route) {
         return
       }
 
-      onSelectItemRef.current(toRouteSearchItem(route))
+      latestRef.current.onSelectItem(toRouteSearchItem(route))
     }
 
     const selectStationById = (stationId: string) => {
-      const station = bootstrapRef.current?.stations.find((entry) => entry.id === stationId)
+      const station = latestRef.current.bootstrap?.stations.find((entry) => entry.id === stationId)
       if (!station) {
         return
       }
 
-      onSelectItemRef.current(toStationSearchItem(station))
+      latestRef.current.onSelectItem(toStationSearchItem(station))
     }
 
     const handleClusterClick = (event: maplibregl.MapLayerMouseEvent) => {
@@ -108,7 +181,7 @@ export function MapView({
         map.easeTo({
           center: [lon, lat],
           zoom,
-          duration: 600,
+          duration: 500,
         })
       })
     }
@@ -135,18 +208,16 @@ export function MapView({
       map.getCanvas().style.cursor = ''
     }
 
-    map.on('moveend', (e) => {
-      if (e.originalEvent) {
-        userHasInteractedRef.current = true
-      }
-    })
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right')
 
     map.on('load', () => {
       ensureLayers(map)
+      syncMapData()
     })
 
     map.on('style.load', () => {
       ensureLayers(map)
+      syncMapData()
     })
 
     map.on('click', 'bus-clusters', handleClusterClick)
@@ -161,7 +232,7 @@ export function MapView({
     }
 
     mapRef.current = map
-    activeStyleRef.current = mapStyle
+    activeStyleRef.current = initialStyleRef.current
 
     return () => {
       map.off('click', 'bus-clusters', handleClusterClick)
@@ -178,15 +249,11 @@ export function MapView({
       map.remove()
       mapRef.current = null
     }
-  }, [mapStyle, onSelectItem])
+  }, [])
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map) {
-      return
-    }
-
-    if (activeStyleRef.current === mapStyle) {
+    if (!map || activeStyleRef.current === mapStyle) {
       return
     }
 
@@ -196,7 +263,7 @@ export function MapView({
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !bootstrap) {
+    if (!map || !map.isStyleLoaded()) {
       return
     }
 
@@ -204,78 +271,82 @@ export function MapView({
     const stationSource = map.getSource('stations') as GeoJSONSource | undefined
     const busSource = map.getSource('buses') as GeoJSONSource | undefined
     const railSource = map.getSource('rail-vehicles') as GeoJSONSource | undefined
+    const itinerarySource = map.getSource('itinerary-lines') as GeoJSONSource | undefined
+    const itineraryPointSource = map.getSource('itinerary-points') as GeoJSONSource | undefined
+    const placeSource = map.getSource('selected-place') as GeoJSONSource | undefined
 
-    if (!routeSource || !stationSource || !busSource || !railSource) {
+    if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource) {
       return
     }
 
-    routeSource.setData(buildRouteCollection(bootstrap, viewMode, selectedItem))
+    routeSource.setData(buildRouteCollection(bootstrap, viewMode, selectedItem, routeFocusIds))
     stationSource.setData(buildStationCollection(bootstrap, viewMode, selectedItem))
-    busSource.setData(buildBusCollection(live, selectedItem))
-    railSource.setData(buildRailCollection(live, selectedItem))
-  }, [bootstrap, live, selectedItem, viewMode])
+    busSource.setData(buildBusCollection(live, selectedItem, routeFocusIds))
+    railSource.setData(buildRailCollection(live, selectedItem, routeFocusIds))
+    itinerarySource.setData(buildItineraryCollection(itinerary))
+    itineraryPointSource.setData(buildItineraryPointCollection(itinerary))
+    placeSource.setData(buildSelectedPlaceCollection(selectedPlace))
+  }, [bootstrap, itinerary, live, routeFocusIds, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !bootstrap) {
+    if (!map || !cameraRequest) {
       return
     }
 
-    if (selectedItem?.type === 'route') {
-      const selectedShapes = bootstrap.shapes.filter(
-        (shape) => shape.routeId === selectedItem.id,
-      )
-      const bounds = computeBounds(selectedShapes.flatMap((shape) => shape.coordinates))
-      map.fitBounds(bounds, { padding: 96, duration: 750 })
-      userHasInteractedRef.current = false
-      return
-    }
-
-    if (selectedItem?.type === 'station') {
+    if (cameraRequest.kind === 'center') {
       map.easeTo({
-        center: [selectedItem.lon, selectedItem.lat],
-        zoom: 13.6,
-        duration: 700,
+        center: cameraRequest.center,
+        zoom: cameraRequest.zoom,
+        duration: cameraRequest.duration ?? 700,
       })
-      userHasInteractedRef.current = false
       return
     }
 
-    if (favoritesFocus.length > 0 && !userHasInteractedRef.current) {
-      const bounds = computeBounds(
-        favoritesFocus.map((favorite) => [favorite.lon, favorite.lat]),
-      )
-      map.fitBounds(bounds, { padding: 84, duration: 700 })
+    if (cameraRequest.points.length === 0) {
       return
     }
 
-    if (!fittedInitialBoundsRef.current) {
-      map.fitBounds(bootstrap.bounds, { padding: 52, duration: 0 })
-      fittedInitialBoundsRef.current = true
+    let minLon = Number.POSITIVE_INFINITY
+    let minLat = Number.POSITIVE_INFINITY
+    let maxLon = Number.NEGATIVE_INFINITY
+    let maxLat = Number.NEGATIVE_INFINITY
+
+    for (const [lon, lat] of cameraRequest.points) {
+      minLon = Math.min(minLon, lon)
+      minLat = Math.min(minLat, lat)
+      maxLon = Math.max(maxLon, lon)
+      maxLat = Math.max(maxLat, lat)
     }
-  }, [bootstrap, favoritesFocus, selectedItem])
+
+    map.fitBounds(
+      [
+        [minLon, minLat],
+        [maxLon, maxLat],
+      ],
+      {
+        padding: cameraRequest.padding ?? 96,
+        duration: cameraRequest.duration ?? 750,
+      },
+    )
+  }, [cameraRequest])
 
   return <div className="map-shell" ref={containerRef} />
 }
 
 function ensureLayers(map: Map) {
-  addGeoJsonSource(map, 'routes', {
-    ...EMPTY_COLLECTION,
-  })
-  addGeoJsonSource(map, 'stations', {
-    ...EMPTY_COLLECTION,
-  })
+  addGeoJsonSource(map, 'routes', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'stations', { ...EMPTY_COLLECTION })
   addGeoJsonSource(
     map,
     'buses',
-    {
-      ...EMPTY_COLLECTION,
-    },
+    { ...EMPTY_COLLECTION },
     { cluster: true, clusterRadius: 38, clusterMaxZoom: 11 },
   )
-  addGeoJsonSource(map, 'rail-vehicles', {
-    ...EMPTY_COLLECTION,
-  })
+  addGeoJsonSource(map, 'rail-vehicles', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'itinerary-lines', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'itinerary-points', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'selected-place', { ...EMPTY_COLLECTION })
 
   addLayerIfMissing(map, {
     id: 'route-lines',
@@ -283,8 +354,8 @@ function ensureLayers(map: Map) {
     source: 'routes',
     paint: {
       'line-color': ['get', 'color'],
-      'line-width': ['coalesce', ['get', 'lineWidth'], 3.25],
-      'line-opacity': ['coalesce', ['get', 'opacity'], 0.9],
+      'line-width': ['coalesce', ['get', 'lineWidth'], 3.2],
+      'line-opacity': ['coalesce', ['get', 'opacity'], 0.88],
     },
     layout: {
       'line-cap': 'round',
@@ -301,13 +372,13 @@ function ensureLayers(map: Map) {
       'text-field': ['get', 'label'],
       'text-font': ['Open Sans Semibold'],
       'text-size': 11,
-      'symbol-spacing': 260,
+      'symbol-spacing': 280,
     },
     paint: {
-      'text-color': '#f8f8f1',
-      'text-halo-color': '#13222d',
+      'text-color': '#f7f7f2',
+      'text-halo-color': '#12202a',
       'text-halo-width': 1,
-      'text-opacity': 0.88,
+      'text-opacity': ['coalesce', ['get', 'textOpacity'], 0.86],
     },
   })
 
@@ -316,10 +387,10 @@ function ensureLayers(map: Map) {
     type: 'circle',
     source: 'stations',
     paint: {
-      'circle-radius': ['coalesce', ['get', 'radius'], 4.4],
+      'circle-radius': ['coalesce', ['get', 'radius'], 4.2],
       'circle-color': ['get', 'color'],
-      'circle-stroke-width': 1.5,
-      'circle-stroke-color': '#fffdf6',
+      'circle-stroke-width': 1.6,
+      'circle-stroke-color': '#fffdf8',
     },
   })
 
@@ -335,8 +406,8 @@ function ensureLayers(map: Map) {
       'text-offset': [0, 1.15],
     },
     paint: {
-      'text-color': '#1d2f36',
-      'text-halo-color': '#fff9ef',
+      'text-color': '#1c2c35',
+      'text-halo-color': '#f8f5ef',
       'text-halo-width': 1.1,
     },
   })
@@ -347,18 +418,10 @@ function ensureLayers(map: Map) {
     source: 'buses',
     filter: ['has', 'point_count'],
     paint: {
-      'circle-color': '#ff6c37',
-      'circle-radius': [
-        'step',
-        ['get', 'point_count'],
-        18,
-        30,
-        22,
-        100,
-        26,
-      ],
+      'circle-color': '#1468ff',
+      'circle-radius': ['step', ['get', 'point_count'], 18, 30, 22, 100, 26],
       'circle-stroke-width': 2,
-      'circle-stroke-color': '#fff3e3',
+      'circle-stroke-color': '#f7f4ee',
     },
   })
 
@@ -373,7 +436,7 @@ function ensureLayers(map: Map) {
       'text-size': 12,
     },
     paint: {
-      'text-color': '#fffdf9',
+      'text-color': '#fffefb',
     },
   })
 
@@ -383,11 +446,11 @@ function ensureLayers(map: Map) {
     source: 'buses',
     filter: ['!', ['has', 'point_count']],
     paint: {
-      'circle-radius': ['coalesce', ['get', 'radius'], 7.5],
-      'circle-color': ['coalesce', ['get', 'color'], '#ff6c37'],
+      'circle-radius': ['coalesce', ['get', 'radius'], 7.3],
+      'circle-color': ['coalesce', ['get', 'color'], '#1468ff'],
       'circle-stroke-width': 2,
-      'circle-stroke-color': '#fffaf1',
-      'circle-opacity': ['coalesce', ['get', 'opacity'], 0.92],
+      'circle-stroke-color': '#fffef7',
+      'circle-opacity': ['coalesce', ['get', 'opacity'], 0.9],
     },
   })
 
@@ -404,7 +467,7 @@ function ensureLayers(map: Map) {
       'text-allow-overlap': true,
     },
     paint: {
-      'text-color': '#fffaf1',
+      'text-color': '#fffef8',
       'text-halo-color': '#152027',
       'text-halo-width': 0.8,
       'text-opacity': ['coalesce', ['get', 'textOpacity'], 0.88],
@@ -416,10 +479,11 @@ function ensureLayers(map: Map) {
     type: 'circle',
     source: 'rail-vehicles',
     paint: {
-      'circle-radius': ['coalesce', ['get', 'radius'], 9],
+      'circle-radius': ['coalesce', ['get', 'radius'], 8.6],
       'circle-color': ['get', 'color'],
       'circle-stroke-width': 2,
-      'circle-stroke-color': '#fffdf7',
+      'circle-stroke-color': '#fffef8',
+      'circle-opacity': ['coalesce', ['get', 'opacity'], 0.94],
     },
   })
 
@@ -434,9 +498,49 @@ function ensureLayers(map: Map) {
       'text-allow-overlap': true,
     },
     paint: {
-      'text-color': '#fffdf7',
+      'text-color': '#fffef8',
       'text-halo-color': '#13222d',
       'text-halo-width': 0.7,
+      'text-opacity': ['coalesce', ['get', 'textOpacity'], 0.88],
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'itinerary-lines',
+    type: 'line',
+    source: 'itinerary-lines',
+    paint: {
+      'line-color': ['get', 'color'],
+      'line-width': ['coalesce', ['get', 'lineWidth'], 4.6],
+      'line-opacity': 0.95,
+    },
+    layout: {
+      'line-cap': 'round',
+      'line-join': 'round',
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'itinerary-points',
+    type: 'circle',
+    source: 'itinerary-points',
+    paint: {
+      'circle-radius': ['coalesce', ['get', 'radius'], 6.4],
+      'circle-color': ['get', 'color'],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#fffef8',
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'selected-place',
+    type: 'circle',
+    source: 'selected-place',
+    paint: {
+      'circle-radius': 9,
+      'circle-color': '#111318',
+      'circle-stroke-width': 3,
+      'circle-stroke-color': '#f7f4ef',
     },
   })
 }
@@ -469,51 +573,65 @@ function visibleModes(viewMode: ViewMode) {
 }
 
 function buildRouteCollection(
-  bootstrap: BootstrapResponse,
+  bootstrap: BootstrapResponse | null,
   viewMode: ViewMode,
   selectedItem: SearchItem | FavoriteItem | null,
+  routeFocusIds: string[],
 ): FeatureCollection<LineString> {
+  if (!bootstrap) {
+    return EMPTY_COLLECTION
+  }
+
   const modes = visibleModes(viewMode)
+  const focusSet = new Set(routeFocusIds)
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
-  const selectedStation = selectedItem?.type === 'station' ? selectedItem.id : null
+  const selectedStationId = selectedItem?.type === 'station' ? selectedItem.id : null
   const selectedStationRoutes = new Set(
-    bootstrap.stations.find((station) => station.id === selectedStation)?.routeIds ?? [],
+    bootstrap.stations.find((station) => station.id === selectedStationId)?.routeIds ?? [],
   )
 
   const shapes = bootstrap.shapes.filter((shape) => {
+    if (selectedRouteId) {
+      return shape.routeId === selectedRouteId || focusSet.has(shape.routeId)
+    }
+
+    if (selectedStationId) {
+      return selectedStationRoutes.has(shape.routeId) || focusSet.has(shape.routeId)
+    }
+
+    if (focusSet.size > 0) {
+      return focusSet.has(shape.routeId)
+    }
+
     if (!modes.has(shape.mode)) {
       return false
     }
 
-    if (shape.mode === 'bus' && !selectedRouteId) {
-      return false
-    }
-
-    if (selectedRouteId) {
-      return shape.routeId === selectedRouteId
-    }
-
-    if (selectedStation) {
-      return selectedStationRoutes.has(shape.routeId)
-    }
-
-    return true
+    return shape.mode !== 'bus'
   })
 
   return {
     type: 'FeatureCollection',
     features: shapes.map((shape) => {
       const route = bootstrap.routes.find((entry) => entry.id === shape.routeId)
-      return routeToFeature(shape, route ?? null, selectedRouteId)
+      return routeToFeature(shape, route ?? null, {
+        selectedRouteId,
+        focusSet,
+        selectedStationRoutes,
+      })
     }),
   }
 }
 
 function buildStationCollection(
-  bootstrap: BootstrapResponse,
+  bootstrap: BootstrapResponse | null,
   viewMode: ViewMode,
   selectedItem: SearchItem | FavoriteItem | null,
 ): FeatureCollection<Point> {
+  if (!bootstrap) {
+    return EMPTY_COLLECTION
+  }
+
   const modes = visibleModes(viewMode)
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
   const selectedStationId = selectedItem?.type === 'station' ? selectedItem.id : null
@@ -541,62 +659,182 @@ function buildStationCollection(
 function buildBusCollection(
   live: LiveResponse | null,
   selectedItem: SearchItem | FavoriteItem | null,
+  routeFocusIds: string[],
 ): FeatureCollection<Point> {
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
+  const focusSet = new Set(routeFocusIds)
   const entities = live?.entities.filter((entity) => entity.mode === 'bus') ?? []
 
   return {
     type: 'FeatureCollection',
-    features: entities.map((entity) => ({
-      type: 'Feature',
-      geometry: {
-        type: 'Point',
-        coordinates: [entity.lon, entity.lat],
-      },
-      properties: {
-        id: entity.id,
-        routeId: entity.routeId,
-        label: entity.label,
-        color: selectedRouteId === entity.routeId ? '#ff6c37' : '#f58c49',
-        radius: selectedRouteId === entity.routeId ? 9.5 : 7,
-        opacity: selectedRouteId && selectedRouteId !== entity.routeId ? 0.34 : 0.92,
-        textOpacity: selectedRouteId && selectedRouteId !== entity.routeId ? 0.18 : 0.88,
-      },
-    })),
+    features: entities.map((entity) => {
+      const isSelected = selectedRouteId === entity.routeId
+      const isFocused = focusSet.size === 0 || focusSet.has(entity.routeId)
+
+      return {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [entity.lon, entity.lat],
+        },
+        properties: {
+          id: entity.id,
+          routeId: entity.routeId,
+          label: entity.label,
+          color: isSelected ? '#0f1720' : '#1468ff',
+          radius: isSelected ? 9.5 : isFocused ? 7.6 : 5.8,
+          opacity: isSelected ? 0.98 : isFocused ? 0.9 : 0.16,
+          textOpacity: isSelected ? 0.9 : isFocused ? 0.82 : 0.1,
+        },
+      }
+    }),
   }
 }
 
 function buildRailCollection(
   live: LiveResponse | null,
   selectedItem: SearchItem | FavoriteItem | null,
+  routeFocusIds: string[],
 ): FeatureCollection<Point> {
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
-  const entities = live?.entities.filter((entity) => entity.mode !== 'bus') ?? []
+  const focusSet = new Set(routeFocusIds)
+  const entities =
+    live?.entities.filter(
+      (entity): entity is LiveEntity & { mode: 'metro' | 'rem' } =>
+        entity.mode === 'metro' || entity.mode === 'rem',
+    ) ?? []
 
   return {
     type: 'FeatureCollection',
-    features: entities.map((entity) => ({
+    features: entities.map((entity) => {
+      const isSelected = selectedRouteId === entity.routeId
+      const isFocused = focusSet.size === 0 || focusSet.has(entity.routeId)
+
+      return {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [entity.lon, entity.lat],
+        },
+        properties: {
+          id: entity.id,
+          routeId: entity.routeId,
+          label: entity.label,
+          color: routeColorForMode(entity.routeId, entity.mode),
+          radius: isSelected ? 10 : 8,
+          opacity: isFocused ? 0.95 : 0.22,
+          textOpacity: isFocused ? 0.88 : 0.14,
+        },
+      }
+    }),
+  }
+}
+
+function buildItineraryCollection(
+  itinerary: Itinerary | null,
+): FeatureCollection<LineString> {
+  if (!itinerary) {
+    return EMPTY_COLLECTION
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: itinerary.segments.map((segment) => ({
       type: 'Feature',
       geometry: {
-        type: 'Point',
-        coordinates: [entity.lon, entity.lat],
+        type: 'LineString',
+        coordinates: segment.geometry,
       },
       properties: {
-        id: entity.id,
-        routeId: entity.routeId,
-        label: entity.label,
-        color: routeColorForMode(entity.routeId, entity.mode),
-        radius: selectedRouteId === entity.routeId ? 10 : 8,
+        id: segment.id,
+        color: itineraryColor(segment.mode),
+        lineWidth: segment.kind === 'walk' ? 3.6 : 4.9,
       },
     })),
+  }
+}
+
+function buildItineraryPointCollection(
+  itinerary: Itinerary | null,
+): FeatureCollection<Point> {
+  if (!itinerary || itinerary.segments.length === 0) {
+    return EMPTY_COLLECTION
+  }
+
+  const firstSegment = itinerary.segments[0]
+  const lastSegment = itinerary.segments.at(-1)
+
+  if (!firstSegment || !lastSegment) {
+    return EMPTY_COLLECTION
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [firstSegment.from.lon, firstSegment.from.lat],
+        },
+        properties: {
+          color: '#111318',
+          radius: 7,
+        },
+      },
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [lastSegment.to.lon, lastSegment.to.lat],
+        },
+        properties: {
+          color: '#f25f4c',
+          radius: 7,
+        },
+      },
+    ],
+  }
+}
+
+function buildSelectedPlaceCollection(
+  selectedPlace: ResolvedPlace | null,
+): FeatureCollection<Point> {
+  if (!selectedPlace) {
+    return EMPTY_COLLECTION
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [selectedPlace.lon, selectedPlace.lat],
+        },
+        properties: {},
+      },
+    ],
   }
 }
 
 function routeToFeature(
   shape: ShapeFeature,
   route: RouteSummary | null,
-  selectedRouteId: string | null,
+  input: {
+    selectedRouteId: string | null
+    focusSet: Set<string>
+    selectedStationRoutes: Set<string>
+  },
 ): Feature<LineString> {
+  const isSelected = input.selectedRouteId === shape.routeId
+  const isFocused = input.focusSet.has(shape.routeId)
+  const isStationContext = input.selectedStationRoutes.has(shape.routeId)
+  const lineOpacity =
+    isSelected ? 0.98 : isFocused ? 0.88 : isStationContext ? 0.72 : 0.34
+  const textOpacity = isSelected || isFocused || isStationContext ? 0.88 : 0.18
+
   return {
     type: 'Feature',
     geometry: {
@@ -605,19 +843,14 @@ function routeToFeature(
     },
     properties: {
       routeId: shape.routeId,
-      color: shape.color,
+      color: isSelected ? '#111318' : shape.color,
       label:
         shape.mode === 'bus'
           ? route?.shortName ?? ''
           : route?.shortName?.replace(/^S/, 'A') ?? shape.routeId.replace(/^S/, 'A'),
-      lineWidth:
-        selectedRouteId === shape.routeId ? 5.4 : shape.mode === 'bus' ? 2.4 : 3.3,
-      opacity:
-        selectedRouteId && selectedRouteId !== shape.routeId
-          ? 0.2
-          : selectedRouteId === shape.routeId
-            ? 0.96
-            : 0.86,
+      lineWidth: isSelected ? 5.8 : isFocused ? 4.4 : shape.mode === 'bus' ? 3 : 3.2,
+      opacity: lineOpacity,
+      textOpacity,
     },
   }
 }
@@ -635,21 +868,29 @@ function stationToFeature(
     properties: {
       id: station.id,
       label: station.name,
-      color: station.mode === 'metro' ? '#0d89d3' : '#52ad43',
-      radius: selected ? 7.6 : 4.8,
+      color: station.mode === 'metro' ? '#0f9d58' : '#4f9d2f',
+      radius: selected ? 6 : 4.4,
     },
   }
 }
 
-function routeColorForMode(routeId: string, mode: ShapeFeature['mode']) {
+function routeColorForMode(routeId: string, mode: 'metro' | 'rem') {
   if (mode === 'metro') {
-    if (routeId === '1') return '#17b059'
-    if (routeId === '2') return '#f47f30'
-    if (routeId === '4') return '#f5d31f'
-    return '#147bd1'
+    if (routeId === '1') return '#f59e0b'
+    if (routeId === '2') return '#ef4444'
+    if (routeId === '4') return '#22c55e'
+    return '#fbbf24'
   }
 
-  return '#52ad43'
+  return '#4f9d2f'
+}
+
+function itineraryColor(mode: Itinerary['segments'][number]['mode']) {
+  if (mode === 'bus') return '#1468ff'
+  if (mode === 'metro') return '#0f9d58'
+  if (mode === 'rem') return '#4f9d2f'
+  if (mode === 'cycling' || mode === 'bixi') return '#111318'
+  return '#69717d'
 }
 
 function toRouteSearchItem(route: RouteSummary): SearchItem {

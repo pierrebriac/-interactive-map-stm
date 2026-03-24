@@ -2,9 +2,14 @@ import type {
   BootstrapResponse,
   FavoriteItem,
   FavoritesResponse,
+  GeocodeResponse,
   LiveResponse,
+  PlanResponse,
+  ProfileResponse,
   SearchItem,
   TransportMode,
+  ItineraryMode,
+  UserProfile,
 } from '../shared/types.ts'
 
 async function apiRequest<T>(input: string, init?: RequestInit) {
@@ -28,18 +33,18 @@ export function fetchBootstrap() {
 
 export function fetchLiveData({
   modes,
-  routeId,
+  routeIds,
   stationId,
 }: {
   modes: TransportMode[]
-  routeId?: string | null
+  routeIds?: string[]
   stationId?: string | null
 }) {
   const searchParams = new URLSearchParams()
   searchParams.set('modes', modes.join(','))
 
-  if (routeId) {
-    searchParams.set('routeId', routeId)
+  if (routeIds && routeIds.length > 0) {
+    searchParams.set('routeIds', routeIds.join(','))
   }
 
   if (stationId) {
@@ -71,5 +76,50 @@ export function saveFavorites(token: string, favorites: FavoriteItem[]) {
       'content-type': 'application/json',
     },
     body: JSON.stringify({ favorites }),
+  })
+}
+
+export function fetchGeocode(query: string, limit = 6) {
+  const searchParams = new URLSearchParams()
+  searchParams.set('q', query.trim())
+  searchParams.set('limit', String(limit))
+
+  return apiRequest<GeocodeResponse>(`/api/geocode?${searchParams.toString()}`)
+}
+
+export function fetchProfile(token: string) {
+  return apiRequest<ProfileResponse>('/api/profile', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
+export function saveProfile(token: string, profile: UserProfile) {
+  return apiRequest<ProfileResponse>('/api/profile', {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ profile }),
+  })
+}
+
+export function fetchPlan(input: {
+  from?: string
+  to?: string
+  fromLat?: number
+  fromLon?: number
+  toLat?: number
+  toLon?: number
+  modes: ItineraryMode[]
+}) {
+  return apiRequest<PlanResponse>('/api/plan', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(input),
   })
 }

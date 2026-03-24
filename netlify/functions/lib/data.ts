@@ -11,6 +11,8 @@ import {
   interpolateAlongPolyline,
   pointToPolylineDistanceKm,
   polylineLengthKm,
+  projectPointToPolyline,
+  slicePolylineAlongDistances,
   simplifyCoordinates,
 } from '../../../src/shared/geo.ts'
 import type {
@@ -39,9 +41,30 @@ const REM_STATUS_URL = 'https://rem.info/fr/se-deplacer/etat-du-service'
 
 const STATIC_CACHE_TTL_MS = 1000 * 60 * 60 * 6
 const LIVE_CACHE_TTL_MS = 1000 * 8
+const TRANSFER_GRID_DEGREES = 0.0032
 
 interface CsvRow {
   [key: string]: string
+}
+
+export interface TransitStopSummary {
+  id: string
+  mode: TransportMode
+  name: string
+  lat: number
+  lon: number
+  routeIds: string[]
+}
+
+export interface TransitEdgeSummary {
+  from: string
+  to: string
+  kind: 'ride' | 'walk'
+  mode: TransportMode | 'walking'
+  routeId?: string
+  distanceKm: number
+  durationMin: number
+  geometry: [number, number][]
 }
 
 interface InternalShape extends ShapeFeature {
@@ -70,6 +93,8 @@ interface InternalModel {
   routesById: Map<string, RouteSummary>
   stationsById: Map<string, StationSummary>
   shapesById: Map<string, InternalShape>
+  transitStopsById: Map<string, TransitStopSummary>
+  transitEdges: TransitEdgeSummary[]
   remTrips: RemTripEstimate[]
   remCalendars: CsvRow[]
   remCalendarDates: CsvRow[]
@@ -80,6 +105,8 @@ interface SerializedModel {
   routes: RouteSummary[]
   stations: StationSummary[]
   shapes: InternalShape[]
+  transitStops: TransitStopSummary[]
+  transitEdges: TransitEdgeSummary[]
   remTrips: RemTripEstimate[]
   remCalendars: CsvRow[]
   remCalendarDates: CsvRow[]
@@ -122,6 +149,15 @@ export async function getBootstrapData() {
   const model = await getInternalModel()
   model.bootstrap.styles = getStyleOptions()
   return model.bootstrap
+}
+
+export async function getTransitPlanningData() {
+  const model = await getInternalModel()
+  return {
+    routesById: model.routesById,
+    transitStopsById: model.transitStopsById,
+    transitEdges: model.transitEdges,
+  }
 }
 
 export async function prepareModelSnapshot(snapshotPath = SNAPSHOT_PATH) {
@@ -184,17 +220,18 @@ export async function searchNetwork(query: string) {
 
 export async function getLiveData({
   modes,
-  routeId,
+  routeIds,
   stationId,
 }: {
   modes: TransportMode[]
-  routeId?: string | null
+  routeIds?: string[]
   stationId?: string | null
 }) {
   const model = await getInternalModel()
   const snapshot = await getLiveSnapshot(model)
 
   const effectiveModes = new Set(modes)
+  const routeFilter = new Set(routeIds?.filter(Boolean) ?? [])
   const selectedStation = stationId
     ? model.stationsById.get(stationId) ?? null
     : null
@@ -204,7 +241,7 @@ export async function getLiveData({
       return false
     }
 
-    if (routeId && entity.routeId !== routeId) {
+    if (routeFilter.size > 0 && !routeFilter.has(entity.routeId)) {
       return false
     }
 
@@ -229,8 +266,8 @@ export async function getLiveData({
       return false
     }
 
-    if (routeId) {
-      return state.routeId === routeId
+    if (routeFilter.size > 0) {
+      return routeFilter.has(state.routeId)
     }
 
     if (selectedStation) {
@@ -240,9 +277,17 @@ export async function getLiveData({
     return state.status !== 'normal' || state.mode !== 'bus'
   })
 
-  if (routeId && !filteredStates.some((state) => state.routeId === routeId)) {
-    const route = model.routesById.get(routeId)
-    if (route) {
+  if (routeFilter.size > 0) {
+    for (const routeId of routeFilter) {
+      if (filteredStates.some((state) => state.routeId === routeId)) {
+        continue
+      }
+
+      const route = model.routesById.get(routeId)
+      if (!route) {
+        continue
+      }
+
       filteredStates.unshift({
         routeId,
         mode: route.mode,
@@ -300,7 +345,12 @@ async function getInternalModel(): Promise<InternalModel> {
 async function loadSnapshotModel() {
   const raw = await readFile(SNAPSHOT_PATH, 'utf8')
   const serialized = JSON.parse(raw) as SerializedModel
-  return applyRuntimeBootstrapSettings(hydrateModel(serialized))
+  const model = applyRuntimeBootstrapSettings(hydrateModel(serialized))
+  if (model.transitStopsById.size === 0 || model.transitEdges.length === 0) {
+    throw new Error('Transit planning snapshot missing enriched stop graph.')
+  }
+
+  return model
 }
 
 async function getLiveSnapshot(model: InternalModel): Promise<LiveSnapshot> {
@@ -354,6 +404,7 @@ async function buildStaticModel(): Promise<InternalModel> {
     stmTripsRows,
     stmShapesRows,
     stmStopsRows,
+    stmStopTimesRows,
     remRoutesRows,
     remTripsRows,
     remShapesRows,
@@ -366,6 +417,7 @@ async function buildStaticModel(): Promise<InternalModel> {
     readZipCsv(stmZip, 'trips.txt'),
     readZipCsv(stmZip, 'shapes.txt'),
     readZipCsv(stmZip, 'stops.txt'),
+    readZipCsv(stmZip, 'stop_times.txt'),
     readZipCsv(remZip, 'routes.txt'),
     readZipCsv(remZip, 'trips.txt'),
     readZipCsv(remZip, 'shapes.txt'),
@@ -467,6 +519,14 @@ async function buildStaticModel(): Promise<InternalModel> {
   }
 
   attachStationsToRoutes(stations, routes, shapesById)
+  const { transitStopsById, transitEdges } = buildTransitPlanningModel({
+    stations,
+    routes,
+    shapesById,
+    stmTripsRows,
+    stmStopsRows,
+    stmStopTimesRows,
+  })
 
   const searchIndex = buildSearchIndex(routes, stations)
   const bounds = computeBounds([
@@ -505,6 +565,8 @@ async function buildStaticModel(): Promise<InternalModel> {
     routesById: routes,
     stationsById: stations,
     shapesById,
+    transitStopsById,
+    transitEdges,
     remTrips,
     remCalendars,
     remCalendarDates,
@@ -517,6 +579,8 @@ function serializeModel(model: InternalModel): SerializedModel {
     routes: Array.from(model.routesById.values()),
     stations: Array.from(model.stationsById.values()),
     shapes: Array.from(model.shapesById.values()),
+    transitStops: Array.from(model.transitStopsById.values()),
+    transitEdges: model.transitEdges,
     remTrips: model.remTrips,
     remCalendars: model.remCalendars,
     remCalendarDates: model.remCalendarDates,
@@ -531,6 +595,10 @@ function hydrateModel(serialized: SerializedModel): InternalModel {
       serialized.stations.map((station) => [station.id, station]),
     ),
     shapesById: new Map(serialized.shapes.map((shape) => [shape.id, shape])),
+    transitStopsById: new Map(
+      (serialized.transitStops ?? []).map((stop) => [stop.id, stop]),
+    ),
+    transitEdges: serialized.transitEdges ?? [],
     remTrips: serialized.remTrips,
     remCalendars: serialized.remCalendars,
     remCalendarDates: serialized.remCalendarDates,
@@ -914,6 +982,436 @@ function buildSearchIndex(
   return [...routeItems, ...stationItems].sort((left, right) =>
     left.label.localeCompare(right.label, 'fr'),
   )
+}
+
+function buildTransitPlanningModel(input: {
+  stations: Map<string, StationSummary>
+  routes: Map<string, RouteSummary>
+  shapesById: Map<string, InternalShape>
+  stmTripsRows: CsvRow[]
+  stmStopsRows: CsvRow[]
+  stmStopTimesRows: CsvRow[]
+}) {
+  const transitStopsById = new Map<string, TransitStopSummary>(
+    Array.from(input.stations.values()).map((station) => [
+      station.id,
+      {
+        id: station.id,
+        mode: station.mode,
+        name: station.name,
+        lat: station.lat,
+        lon: station.lon,
+        routeIds: [...station.routeIds],
+      } satisfies TransitStopSummary,
+    ]),
+  )
+  const edgeByKey = new Map<string, TransitEdgeSummary>()
+
+  attachRailTransitEdges(
+    input.routes,
+    input.shapesById,
+    transitStopsById,
+    edgeByKey,
+  )
+
+  buildBusTransitNetwork(
+    input.stmTripsRows,
+    input.stmStopsRows,
+    input.stmStopTimesRows,
+    input.routes,
+    transitStopsById,
+    edgeByKey,
+  )
+
+  attachTransferEdges(transitStopsById, edgeByKey)
+
+  return {
+    transitStopsById,
+    transitEdges: Array.from(edgeByKey.values()),
+  }
+}
+
+function attachRailTransitEdges(
+  routes: Map<string, RouteSummary>,
+  shapesById: Map<string, InternalShape>,
+  transitStopsById: Map<string, TransitStopSummary>,
+  edgeByKey: Map<string, TransitEdgeSummary>,
+) {
+  for (const route of routes.values()) {
+    if (route.mode === 'bus') {
+      continue
+    }
+
+    for (const shapeId of route.shapeIds) {
+      const shape = shapesById.get(shapeId)
+      if (!shape) {
+        continue
+      }
+
+      const orderedStops = route.stationIds
+        .map((stationId) => transitStopsById.get(stationId))
+        .filter((stop): stop is TransitStopSummary => Boolean(stop))
+        .map((stop) => ({
+          stop,
+          projection: projectPointToPolyline([stop.lon, stop.lat], shape.fullCoordinates),
+        }))
+        .filter((entry) => Number.isFinite(entry.projection.distanceKm))
+        .sort(
+          (left, right) =>
+            left.projection.distanceAlongKm - right.projection.distanceAlongKm,
+        )
+
+      for (let index = 1; index < orderedStops.length; index += 1) {
+        const previous = orderedStops[index - 1]
+        const current = orderedStops[index]
+        const distanceKm = Math.max(
+          current.projection.distanceAlongKm - previous.projection.distanceAlongKm,
+          haversineKm(
+            previous.stop.lat,
+            previous.stop.lon,
+            current.stop.lat,
+            current.stop.lon,
+          ),
+        )
+
+        if (distanceKm <= 0.05) {
+          continue
+        }
+
+        const geometry = slicePolylineAlongDistances(
+          shape.fullCoordinates,
+          shape.distances,
+          previous.projection.distanceAlongKm,
+          current.projection.distanceAlongKm,
+        )
+        const durationMin = estimateTransitRideDuration(distanceKm, route.mode)
+
+        storeTransitEdge(edgeByKey, {
+          from: previous.stop.id,
+          to: current.stop.id,
+          kind: 'ride',
+          mode: route.mode,
+          routeId: route.id,
+          distanceKm,
+          durationMin,
+          geometry,
+        })
+
+        storeTransitEdge(edgeByKey, {
+          from: current.stop.id,
+          to: previous.stop.id,
+          kind: 'ride',
+          mode: route.mode,
+          routeId: route.id,
+          distanceKm,
+          durationMin,
+          geometry: [...geometry].reverse() as [number, number][],
+        })
+      }
+    }
+  }
+}
+
+function buildBusTransitNetwork(
+  stmTripsRows: CsvRow[],
+  stmStopsRows: CsvRow[],
+  stmStopTimesRows: CsvRow[],
+  routes: Map<string, RouteSummary>,
+  transitStopsById: Map<string, TransitStopSummary>,
+  edgeByKey: Map<string, TransitEdgeSummary>,
+) {
+  const tripById = new Map(stmTripsRows.map((row) => [row.trip_id, row]))
+  const stopById = new Map(
+    stmStopsRows
+      .filter(
+        (row) =>
+          row.location_type !== '1' &&
+          row.stop_id &&
+          Number.isFinite(Number.parseFloat(row.stop_lat)) &&
+          Number.isFinite(Number.parseFloat(row.stop_lon)),
+      )
+      .map((row) => [row.stop_id, row]),
+  )
+  const stopTimesByTrip = new Map<string, CsvRow[]>()
+
+  for (const row of stmStopTimesRows) {
+    const trip = tripById.get(row.trip_id)
+    if (!trip) {
+      continue
+    }
+
+    const route = routes.get(trip.route_id)
+    if (!route || route.mode !== 'bus') {
+      continue
+    }
+
+    const bucket = stopTimesByTrip.get(row.trip_id) ?? []
+    bucket.push(row)
+    stopTimesByTrip.set(row.trip_id, bucket)
+  }
+
+  for (const [tripId, stopTimes] of stopTimesByTrip) {
+    const trip = tripById.get(tripId)
+    if (!trip) {
+      continue
+    }
+
+    const route = routes.get(trip.route_id)
+    if (!route || route.mode !== 'bus') {
+      continue
+    }
+
+    const ordered = [...stopTimes].sort(
+      (left, right) =>
+        Number.parseInt(left.stop_sequence, 10) -
+        Number.parseInt(right.stop_sequence, 10),
+    )
+
+    for (let index = 1; index < ordered.length; index += 1) {
+      const previous = ordered[index - 1]
+      const current = ordered[index]
+      const previousStop = stopById.get(previous.stop_id)
+      const currentStop = stopById.get(current.stop_id)
+      if (!previousStop || !currentStop) {
+        continue
+      }
+
+      const fromStop = upsertBusTransitStop(previousStop, route.id, transitStopsById)
+      const toStop = upsertBusTransitStop(currentStop, route.id, transitStopsById)
+      const distanceKm = Math.max(
+        haversineKm(fromStop.lat, fromStop.lon, toStop.lat, toStop.lon),
+        parseShapeDistanceDeltaKm(previous, current),
+      )
+
+      if (distanceKm <= 0.03) {
+        continue
+      }
+
+      const durationMin = estimateBusSegmentDuration(previous, current, distanceKm)
+
+      storeTransitEdge(edgeByKey, {
+        from: fromStop.id,
+        to: toStop.id,
+        kind: 'ride',
+        mode: 'bus',
+        routeId: route.id,
+        distanceKm,
+        durationMin,
+        geometry: [
+          [fromStop.lon, fromStop.lat],
+          [toStop.lon, toStop.lat],
+        ],
+      })
+    }
+  }
+}
+
+function upsertBusTransitStop(
+  row: CsvRow,
+  routeId: string,
+  transitStopsById: Map<string, TransitStopSummary>,
+) {
+  const id = `bus:${row.stop_id}`
+  const existing = transitStopsById.get(id)
+
+  if (existing) {
+    if (!existing.routeIds.includes(routeId)) {
+      existing.routeIds.push(routeId)
+      existing.routeIds.sort((left, right) =>
+        left.localeCompare(right, 'fr', { numeric: true }),
+      )
+    }
+
+    return existing
+  }
+
+  const stop = {
+    id,
+    mode: 'bus',
+    name: row.stop_name?.trim() || row.stop_id,
+    lat: Number.parseFloat(row.stop_lat),
+    lon: Number.parseFloat(row.stop_lon),
+    routeIds: [routeId],
+  } satisfies TransitStopSummary
+
+  transitStopsById.set(id, stop)
+  return stop
+}
+
+function attachTransferEdges(
+  transitStopsById: Map<string, TransitStopSummary>,
+  edgeByKey: Map<string, TransitEdgeSummary>,
+) {
+  const cells = new Map<string, TransitStopSummary[]>()
+  const stops = Array.from(transitStopsById.values())
+
+  for (const stop of stops) {
+    const key = gridKey(stop.lat, stop.lon)
+    const bucket = cells.get(key) ?? []
+    bucket.push(stop)
+    cells.set(key, bucket)
+  }
+
+  for (const stop of stops) {
+    const [gridLat, gridLon] = toGridCoords(stop.lat, stop.lon)
+    const seen = new Set<string>()
+
+    for (let latOffset = -1; latOffset <= 1; latOffset += 1) {
+      for (let lonOffset = -1; lonOffset <= 1; lonOffset += 1) {
+        const bucket = cells.get(`${gridLat + latOffset}:${gridLon + lonOffset}`) ?? []
+        for (const candidate of bucket) {
+          if (candidate.id === stop.id || seen.has(candidate.id)) {
+            continue
+          }
+
+          seen.add(candidate.id)
+          if (candidate.id < stop.id) {
+            continue
+          }
+
+          const thresholdKm = transferThresholdKm(stop, candidate)
+          if (thresholdKm <= 0) {
+            continue
+          }
+
+          const distanceKm = haversineKm(stop.lat, stop.lon, candidate.lat, candidate.lon)
+          if (distanceKm > thresholdKm) {
+            continue
+          }
+
+          const effectiveDistanceKm = Math.max(distanceKm, 0.04)
+          const durationMin =
+            estimateWalkingDuration(effectiveDistanceKm) +
+            (stop.mode === candidate.mode ? 0.7 : 1.4)
+          const geometry = [
+            [stop.lon, stop.lat],
+            [candidate.lon, candidate.lat],
+          ] as [number, number][]
+
+          storeTransitEdge(edgeByKey, {
+            from: stop.id,
+            to: candidate.id,
+            kind: 'walk',
+            mode: 'walking',
+            distanceKm: effectiveDistanceKm,
+            durationMin,
+            geometry,
+          })
+
+          storeTransitEdge(edgeByKey, {
+            from: candidate.id,
+            to: stop.id,
+            kind: 'walk',
+            mode: 'walking',
+            distanceKm: effectiveDistanceKm,
+            durationMin,
+            geometry: [...geometry].reverse() as [number, number][],
+          })
+        }
+      }
+    }
+  }
+}
+
+function transferThresholdKm(left: TransitStopSummary, right: TransitStopSummary) {
+  const sameName = normalizeText(left.name) === normalizeText(right.name)
+
+  if (sameName) {
+    return 0.45
+  }
+
+  if (left.mode === 'bus' && right.mode === 'bus') {
+    return 0
+  }
+
+  if (left.mode === 'bus' || right.mode === 'bus') {
+    return 0.24
+  }
+
+  return 0.32
+}
+
+function storeTransitEdge(
+  edgeByKey: Map<string, TransitEdgeSummary>,
+  edge: TransitEdgeSummary,
+) {
+  const key = `${edge.from}:${edge.to}:${edge.kind}:${edge.routeId ?? edge.mode}`
+  const existing = edgeByKey.get(key)
+
+  if (!existing || edge.durationMin < existing.durationMin) {
+    edgeByKey.set(key, edge)
+  }
+}
+
+function parseShapeDistanceDeltaKm(previous: CsvRow, current: CsvRow) {
+  const previousValue = Number.parseFloat(previous.shape_dist_traveled || '')
+  const currentValue = Number.parseFloat(current.shape_dist_traveled || '')
+
+  if (!Number.isFinite(previousValue) || !Number.isFinite(currentValue)) {
+    return 0
+  }
+
+  const delta = currentValue - previousValue
+  if (!Number.isFinite(delta) || delta <= 0) {
+    return 0
+  }
+
+  return delta > 100 ? delta / 1000 : delta
+}
+
+function estimateBusSegmentDuration(
+  previous: CsvRow,
+  current: CsvRow,
+  distanceKm: number,
+) {
+  const previousTime = parseStopTime(previous.departure_time || previous.arrival_time)
+  const currentTime = parseStopTime(current.arrival_time || current.departure_time)
+  const scheduledMinutes =
+    previousTime !== null && currentTime !== null && currentTime > previousTime
+      ? (currentTime - previousTime) / 60
+      : null
+
+  if (scheduledMinutes && Number.isFinite(scheduledMinutes)) {
+    return Math.max(1.2, scheduledMinutes)
+  }
+
+  return estimateTransitRideDuration(distanceKm, 'bus')
+}
+
+function parseStopTime(value: string | undefined) {
+  if (!value || !value.includes(':')) {
+    return null
+  }
+
+  return parseGtfsTime(value)
+}
+
+function estimateTransitRideDuration(
+  distanceKm: number,
+  mode: TransportMode,
+) {
+  const speedKmH =
+    mode === 'rem' ? 40 : mode === 'metro' ? 30 : 18
+  const dwellMin =
+    mode === 'rem' ? 0.7 : mode === 'metro' ? 1.1 : 0.45
+
+  return (distanceKm / speedKmH) * 60 + dwellMin
+}
+
+function estimateWalkingDuration(distanceKm: number) {
+  return (distanceKm / 4.8) * 60
+}
+
+function toGridCoords(lat: number, lon: number) {
+  return [
+    Math.floor(lat / TRANSFER_GRID_DEGREES),
+    Math.floor(lon / TRANSFER_GRID_DEGREES),
+  ] as const
+}
+
+function gridKey(lat: number, lon: number) {
+  const [gridLat, gridLon] = toGridCoords(lat, lon)
+  return `${gridLat}:${gridLon}`
 }
 
 function buildRemTrips(

@@ -5,6 +5,12 @@ export type ViewMode = 'combined' | 'bixi' | TransportMode
 export type SearchItemType = 'route' | 'station'
 export type FavoriteType = 'route' | 'station'
 export type ServiceStatus = 'normal' | 'warning' | 'interruption' | 'unknown'
+export type SavedPlaceKind = 'home' | 'work' | 'saved'
+export type LocationPreference =
+  | 'unknown'
+  | 'granted'
+  | 'denied'
+  | 'prompt-dismissed'
 
 export interface RouteSummary {
   id: string
@@ -99,6 +105,7 @@ export interface FavoriteItem {
   subtitle: string
   lat: number
   lon: number
+  pinnedToMap: boolean
 }
 
 export interface FavoritesResponse {
@@ -126,6 +133,11 @@ export interface ResolvedPlace extends GeoPoint {
   address: string
   placeType: string
   relevance: number
+}
+
+export interface SavedPlace extends ResolvedPlace {
+  kind: SavedPlaceKind
+  name: string
 }
 
 export interface GeocodeResponse {
@@ -168,10 +180,11 @@ export interface BixiResponse {
   warnings: string[]
 }
 
-export type ItineraryMode = 'walking' | 'transit' | 'bixi'
+export type ItineraryMode = 'walking' | 'transit' | 'bixi' | 'cycling'
 export type ItinerarySegmentMode =
   | 'walking'
   | 'cycling'
+  | 'bus'
   | 'metro'
   | 'rem'
   | 'bixi'
@@ -214,4 +227,18 @@ export interface PlanResponse {
   destination: ResolvedPlace
   itineraries: Itinerary[]
   warnings: string[]
+}
+
+export interface UserProfile {
+  displayName: string
+  savedPlaces: SavedPlace[]
+  locationPreference: LocationPreference
+}
+
+export interface ProfileResponse {
+  profile: UserProfile
+  user: {
+    id: string
+    email: string | null
+  } | null
 }

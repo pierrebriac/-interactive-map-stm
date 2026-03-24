@@ -1,65 +1,51 @@
-import {
-  cumulativePolylineDistances,
-  haversineKm,
-  projectPointToPolyline,
-  slicePolylineAlongDistances,
-} from '../../../src/shared/geo.ts'
+import { haversineKm } from '../../../src/shared/geo.ts'
 import type {
   BixiStation,
-  BootstrapResponse,
   GeoPoint,
   Itinerary,
+  ItineraryMode,
   ItineraryPlace,
   ItinerarySegment,
   PlanResponse,
   ResolvedPlace,
   RouteSummary,
-  ShapeFeature,
-  StationSummary,
 } from '../../../src/shared/types.ts'
 import { getBixiData } from './bixi.ts'
-import { getBootstrapData } from './data.ts'
+import {
+  getTransitPlanningData,
+  type TransitEdgeSummary,
+  type TransitStopSummary,
+} from './data.ts'
 import {
   estimateSurfacePath,
   resolvePlace,
   routeSurfacePath,
 } from './places.ts'
 
-interface TransitEdge {
-  to: string
-  kind: 'ride' | 'walk'
-  mode: 'metro' | 'rem' | 'walking'
-  routeId?: string
-  distanceKm: number
-  durationMin: number
-  geometry: [number, number][]
-}
-
 interface GraphCandidate {
-  station: StationSummary
+  stop: TransitStopSummary
   access: number
 }
 
 interface PathStep {
   from: string
   to: string
-  edge: TransitEdge
+  edge: TransitEdgeSummary
 }
 
 interface TransitGraph {
-  bootstrap: BootstrapResponse
-  graph: Map<string, TransitEdge[]>
-  stationsById: Map<string, StationSummary>
+  graph: Map<string, TransitEdgeSummary[]>
+  transitStopsById: Map<string, TransitStopSummary>
   routesById: Map<string, RouteSummary>
 }
 
-const TRANSFER_DISTANCE_KM = 0.4
-const TRANSIT_ACCESS_LIMIT_KM = 3.2
 const BIXI_ACCESS_LIMIT_KM = 1.8
+const BUS_ACCESS_LIMIT_KM = 1.1
+const RAIL_ACCESS_LIMIT_KM = 3.2
 
 let transitGraphCache:
   | {
-      generatedAt: string
+      key: string
       value: TransitGraph
     }
   | undefined
@@ -71,7 +57,7 @@ export async function buildPlan(input: {
   fromLon?: number | null
   toLat?: number | null
   toLon?: number | null
-  modes?: Array<'walking' | 'transit' | 'bixi'>
+  modes?: ItineraryMode[]
 }) {
   const origin = await resolvePlace({
     query: input.from,
@@ -87,7 +73,7 @@ export async function buildPlan(input: {
   })
   const modes = input.modes && input.modes.length > 0
     ? Array.from(new Set(input.modes))
-    : (['walking', 'transit', 'bixi'] as const)
+    : (['walking', 'transit', 'cycling', 'bixi'] as const)
 
   const warnings: string[] = []
   const itineraries: Itinerary[] = []
@@ -96,20 +82,29 @@ export async function buildPlan(input: {
     try {
       if (mode === 'walking') {
         itineraries.push(await buildWalkingItinerary(origin, destination))
-      } else if (mode === 'transit') {
+        continue
+      }
+
+      if (mode === 'transit') {
         const itinerary = await buildTransitItinerary(origin, destination)
         if (itinerary) {
           itineraries.push(itinerary)
         } else {
           warnings.push('Aucun itinéraire transit viable trouvé entre ces adresses.')
         }
+        continue
+      }
+
+      if (mode === 'cycling') {
+        itineraries.push(await buildCyclingItinerary(origin, destination))
+        continue
+      }
+
+      const itinerary = await buildBixiItinerary(origin, destination)
+      if (itinerary) {
+        itineraries.push(itinerary)
       } else {
-        const itinerary = await buildBixiItinerary(origin, destination)
-        if (itinerary) {
-          itineraries.push(itinerary)
-        } else {
-          warnings.push('Aucun itinéraire BIXI viable trouvé entre ces adresses.')
-        }
+        warnings.push('Aucun itinéraire BIXI viable trouvé entre ces adresses.')
       }
     } catch (error) {
       warnings.push(
@@ -159,16 +154,44 @@ async function buildWalkingItinerary(origin: ResolvedPlace, destination: Resolve
   } satisfies Itinerary
 }
 
+async function buildCyclingItinerary(origin: ResolvedPlace, destination: ResolvedPlace) {
+  const route = await routeSurfacePath(origin, destination, 'cycling')
+
+  return {
+    id: 'cycling',
+    mode: 'cycling',
+    summary: 'Vélo personnel',
+    durationMin: Math.round(route.durationMin),
+    distanceKm: round1(route.distanceKm),
+    transfers: 0,
+    segments: [
+      buildSurfaceSegment({
+        id: 'cycling:direct',
+        kind: 'bike',
+        mode: 'cycling',
+        label: 'Vélo personnel',
+        from: toItineraryPlace(origin),
+        to: toItineraryPlace(destination),
+        distanceKm: route.distanceKm,
+        durationMin: route.durationMin,
+        geometry: route.geometry,
+      }),
+    ],
+    warnings:
+      route.provider === 'estimated'
+        ? ['Temps et tracé vélo estimés, faute de moteur de routage externe.']
+        : [],
+  } satisfies Itinerary
+}
+
 async function buildTransitItinerary(
   origin: ResolvedPlace,
   destination: ResolvedPlace,
 ) {
   const graph = await getTransitGraph()
-  const originCandidates = pickTransitCandidates(origin, graph.bootstrap.stations)
-  const destinationCandidates = pickTransitCandidates(
-    destination,
-    graph.bootstrap.stations,
-  )
+  const stops = Array.from(graph.transitStopsById.values())
+  const originCandidates = pickTransitCandidates(origin, stops)
+  const destinationCandidates = pickTransitCandidates(destination, stops)
 
   if (originCandidates.length === 0 || destinationCandidates.length === 0) {
     return null
@@ -187,8 +210,8 @@ async function buildTransitItinerary(
     for (const destinationCandidate of destinationCandidates) {
       const path = shortestTransitPath(
         graph.graph,
-        originCandidate.station.id,
-        destinationCandidate.station.id,
+        originCandidate.stop.id,
+        destinationCandidate.stop.id,
       )
 
       if (!path) {
@@ -217,15 +240,19 @@ async function buildTransitItinerary(
     return null
   }
 
-  const accessRoute = await routeSurfacePath(origin, best.originCandidate.station, 'walking')
+  const accessRoute = await routeSurfacePath(
+    origin,
+    best.originCandidate.stop,
+    'walking',
+  )
   const egressRoute = await routeSurfacePath(
-    best.destinationCandidate.station,
+    best.destinationCandidate.stop,
     destination,
     'walking',
   )
   const rideSegments = collapseTransitPath(
     best.path,
-    graph.stationsById,
+    graph.transitStopsById,
     graph.routesById,
   )
 
@@ -234,14 +261,14 @@ async function buildTransitItinerary(
       id: 'transit:walk:start',
       kind: 'walk',
       mode: 'walking',
-      label: `Marcher jusqu’à ${best.originCandidate.station.name}`,
+      label: `Marcher jusqu’à ${best.originCandidate.stop.name}`,
       from: toItineraryPlace(origin),
-      to: toItineraryPlace(best.originCandidate.station),
+      to: toItineraryPlace(best.originCandidate.stop),
       distanceKm: accessRoute.distanceKm,
       durationMin: accessRoute.durationMin,
       geometry: accessRoute.geometry,
-      stationId: best.originCandidate.station.id,
-      stationName: best.originCandidate.station.name,
+      stationId: best.originCandidate.stop.id,
+      stationName: best.originCandidate.stop.name,
     }),
     ...rideSegments,
     buildSurfaceSegment({
@@ -249,13 +276,13 @@ async function buildTransitItinerary(
       kind: 'walk',
       mode: 'walking',
       label: `Marcher jusqu’à ${destination.label}`,
-      from: toItineraryPlace(best.destinationCandidate.station),
+      from: toItineraryPlace(best.destinationCandidate.stop),
       to: toItineraryPlace(destination),
       distanceKm: egressRoute.distanceKm,
       durationMin: egressRoute.durationMin,
       geometry: egressRoute.geometry,
-      stationId: best.destinationCandidate.station.id,
-      stationName: best.destinationCandidate.station.name,
+      stationId: best.destinationCandidate.stop.id,
+      stationName: best.destinationCandidate.stop.name,
     }),
   ].filter((segment) => segment.durationMin > 0)
 
@@ -416,174 +443,69 @@ async function buildBixiItinerary(
 }
 
 async function getTransitGraph() {
-  const bootstrap = await getBootstrapData()
-  if (transitGraphCache?.generatedAt === bootstrap.generatedAt) {
+  const planning = await getTransitPlanningData()
+  const cacheKey = [
+    planning.routesById.size,
+    planning.transitStopsById.size,
+    planning.transitEdges.length,
+  ].join(':')
+
+  if (transitGraphCache?.key === cacheKey) {
     return transitGraphCache.value
   }
 
-  const graph = new Map<string, TransitEdge[]>()
-  const stationsById = new Map(bootstrap.stations.map((station) => [station.id, station]))
-  const routesById = new Map(bootstrap.routes.map((route) => [route.id, route]))
-  const shapesById = new Map(bootstrap.shapes.map((shape) => [shape.id, shape]))
-
-  for (const station of bootstrap.stations) {
-    graph.set(station.id, [])
+  const graph = new Map<string, TransitEdgeSummary[]>()
+  for (const stopId of planning.transitStopsById.keys()) {
+    graph.set(stopId, [])
   }
 
-  for (const route of bootstrap.routes) {
-    if (route.mode === 'bus') {
-      continue
-    }
-
-    const railRoute = route as RouteSummary & { mode: 'metro' | 'rem' }
-
-    for (const shapeId of railRoute.shapeIds) {
-      const shape = shapesById.get(shapeId)
-      if (!shape) {
-        continue
-      }
-
-      attachRouteShapeEdges(graph, railRoute, shape, stationsById)
-    }
+  for (const edge of planning.transitEdges) {
+    const bucket = graph.get(edge.from) ?? []
+    bucket.push(edge)
+    graph.set(edge.from, bucket)
   }
-
-  attachTransferEdges(graph, bootstrap.stations)
 
   const value = {
-    bootstrap,
     graph,
-    stationsById,
-    routesById,
+    transitStopsById: planning.transitStopsById,
+    routesById: planning.routesById,
   } satisfies TransitGraph
 
   transitGraphCache = {
-    generatedAt: bootstrap.generatedAt,
+    key: cacheKey,
     value,
   }
 
   return value
 }
 
-function attachRouteShapeEdges(
-  graph: Map<string, TransitEdge[]>,
-  route: RouteSummary & { mode: 'metro' | 'rem' },
-  shape: ShapeFeature,
-  stationsById: Map<string, StationSummary>,
-) {
-  const distances = cumulativePolylineDistances(shape.coordinates)
-  const orderedStations = route.stationIds
-    .map((stationId) => stationsById.get(stationId))
-    .filter((station): station is StationSummary => Boolean(station))
-    .map((station) => ({
-      station,
-      projection: projectPointToPolyline([station.lon, station.lat], shape.coordinates),
+function pickTransitCandidates(place: GeoPoint, stops: TransitStopSummary[]) {
+  return stops
+    .map((stop) => ({
+      stop,
+      distanceKm: haversineKm(place.lat, place.lon, stop.lat, stop.lon),
     }))
-    .filter((entry) => Number.isFinite(entry.projection.distanceKm))
-    .sort((left, right) => left.projection.distanceAlongKm - right.projection.distanceAlongKm)
-
-  for (let index = 1; index < orderedStations.length; index += 1) {
-    const previous = orderedStations[index - 1]
-    const current = orderedStations[index]
-    const distanceKm = Math.max(
-      current.projection.distanceAlongKm - previous.projection.distanceAlongKm,
-      haversineKm(
-        previous.station.lat,
-        previous.station.lon,
-        current.station.lat,
-        current.station.lon,
-      ),
-    )
-
-    if (distanceKm <= 0.05) {
-      continue
-    }
-
-    const geometry = slicePolylineAlongDistances(
-      shape.coordinates,
-      distances,
-      previous.projection.distanceAlongKm,
-      current.projection.distanceAlongKm,
-    )
-    const durationMin = estimateRideDuration(distanceKm, route.mode)
-
-    addTransitEdge(graph, previous.station.id, {
-      to: current.station.id,
-      kind: 'ride',
-      mode: route.mode,
-      routeId: route.id,
-      distanceKm,
-      durationMin,
-      geometry,
+    .filter((entry) => entry.distanceKm <= transitAccessLimit(entry.stop.mode))
+    .sort((left, right) => {
+      const leftScore = left.distanceKm + transitCandidateBias(left.stop.mode)
+      const rightScore = right.distanceKm + transitCandidateBias(right.stop.mode)
+      return leftScore - rightScore
     })
-
-    addTransitEdge(graph, current.station.id, {
-      to: previous.station.id,
-      kind: 'ride',
-      mode: route.mode,
-      routeId: route.id,
-      distanceKm,
-      durationMin,
-      geometry: [...geometry].reverse() as [number, number][],
-    })
-  }
-}
-
-function attachTransferEdges(
-  graph: Map<string, TransitEdge[]>,
-  stations: StationSummary[],
-) {
-  for (let leftIndex = 0; leftIndex < stations.length; leftIndex += 1) {
-    const left = stations[leftIndex]
-    for (let rightIndex = leftIndex + 1; rightIndex < stations.length; rightIndex += 1) {
-      const right = stations[rightIndex]
-      const distanceKm = haversineKm(left.lat, left.lon, right.lat, right.lon)
-      const sameName = normalizeName(left.name) === normalizeName(right.name)
-
-      if (!sameName && distanceKm > TRANSFER_DISTANCE_KM) {
-        continue
-      }
-
-      const effectiveDistanceKm = Math.max(distanceKm, 0.05)
-      const durationMin = estimateWalkingDuration(effectiveDistanceKm) + 2
-      const geometry = [
-        [left.lon, left.lat],
-        [right.lon, right.lat],
-      ] as [number, number][]
-
-      addTransitEdge(graph, left.id, {
-        to: right.id,
-        kind: 'walk',
-        mode: 'walking',
-        distanceKm: effectiveDistanceKm,
-        durationMin,
-        geometry,
-      })
-
-      addTransitEdge(graph, right.id, {
-        to: left.id,
-        kind: 'walk',
-        mode: 'walking',
-        distanceKm: effectiveDistanceKm,
-        durationMin,
-        geometry: [...geometry].reverse() as [number, number][],
-      })
-    }
-  }
-}
-
-function pickTransitCandidates(place: GeoPoint, stations: StationSummary[]) {
-  return stations
-    .map((station) => ({
-      station,
-      distanceKm: haversineKm(place.lat, place.lon, station.lat, station.lon),
-    }))
-    .filter((entry) => entry.distanceKm <= TRANSIT_ACCESS_LIMIT_KM)
-    .sort((left, right) => left.distanceKm - right.distanceKm)
-    .slice(0, 5)
+    .slice(0, 12)
     .map<GraphCandidate>((entry) => ({
-      station: entry.station,
-      access: estimateWalkingDuration(entry.distanceKm * 1.18),
+      stop: entry.stop,
+      access: estimateWalkingDuration(
+        entry.distanceKm * (entry.stop.mode === 'bus' ? 1.08 : 1.18),
+      ),
     }))
+}
+
+function transitAccessLimit(mode: TransitStopSummary['mode']) {
+  return mode === 'bus' ? BUS_ACCESS_LIMIT_KM : RAIL_ACCESS_LIMIT_KM
+}
+
+function transitCandidateBias(mode: TransitStopSummary['mode']) {
+  return mode === 'bus' ? 0 : 0.15
 }
 
 function pickBixiOriginCandidates(place: GeoPoint, stations: BixiStation[]) {
@@ -623,13 +545,13 @@ function pickBixiDestinationCandidates(place: GeoPoint, stations: BixiStation[])
 }
 
 function shortestTransitPath(
-  graph: Map<string, TransitEdge[]>,
+  graph: Map<string, TransitEdgeSummary[]>,
   originId: string,
   destinationId: string,
 ) {
   const queue = [{ stationId: originId, durationMin: 0 }]
   const bestDuration = new Map<string, number>([[originId, 0]])
-  const previous = new Map<string, { stationId: string; edge: TransitEdge }>()
+  const previous = new Map<string, { stationId: string; edge: TransitEdgeSummary }>()
   const visited = new Set<string>()
 
   while (queue.length > 0) {
@@ -681,32 +603,29 @@ function shortestTransitPath(
 
 function collapseTransitPath(
   path: PathStep[],
-  stationsById: Map<string, StationSummary>,
+  transitStopsById: Map<string, TransitStopSummary>,
   routesById: Map<string, RouteSummary>,
 ) {
   const segments: ItinerarySegment[] = []
 
   for (const step of path) {
-    const fromStation = stationsById.get(step.from)
-    const toStation = stationsById.get(step.to)
-    if (!fromStation || !toStation) {
+    const fromStop = transitStopsById.get(step.from)
+    const toStop = transitStopsById.get(step.to)
+    if (!fromStop || !toStop) {
       continue
     }
 
     if (step.edge.kind === 'ride') {
-      const route = step.edge.routeId ? routesById.get(step.edge.routeId) : null
-      const label =
-        route?.mode === 'metro'
-          ? `Métro ligne ${route.shortName}`
-          : `REM ${route?.shortName?.replace(/^S/, 'A') ?? step.edge.routeId ?? ''}`.trim()
-
+      const route = step.edge.routeId ? routesById.get(step.edge.routeId) : undefined
+      const label = transitRideLabel(route, step.edge.routeId, step.edge.mode)
       const previousSegment = segments.at(-1)
+
       if (
         previousSegment &&
         previousSegment.kind === 'ride' &&
         previousSegment.routeId === step.edge.routeId
       ) {
-        previousSegment.to = toItineraryPlace(toStation)
+        previousSegment.to = toItineraryPlace(toStop)
         previousSegment.durationMin = Math.round(
           previousSegment.durationMin + step.edge.durationMin,
         )
@@ -721,12 +640,12 @@ function collapseTransitPath(
       }
 
       segments.push({
-        id: `ride:${step.edge.routeId}:${step.from}:${step.to}`,
+        id: `ride:${step.edge.routeId ?? step.from}:${step.to}`,
         kind: 'ride',
         mode: step.edge.mode,
         label,
-        from: toItineraryPlace(fromStation),
-        to: toItineraryPlace(toStation),
+        from: toItineraryPlace(fromStop),
+        to: toItineraryPlace(toStop),
         durationMin: Math.round(step.edge.durationMin),
         distanceKm: round1(step.edge.distanceKm),
         routeId: step.edge.routeId,
@@ -740,8 +659,8 @@ function collapseTransitPath(
       kind: 'walk',
       mode: 'walking',
       label: 'Correspondance à pied',
-      from: toItineraryPlace(fromStation),
-      to: toItineraryPlace(toStation),
+      from: toItineraryPlace(fromStop),
+      to: toItineraryPlace(toStop),
       durationMin: Math.round(step.edge.durationMin),
       distanceKm: round1(step.edge.distanceKm),
       geometry: step.edge.geometry,
@@ -749,6 +668,22 @@ function collapseTransitPath(
   }
 
   return segments
+}
+
+function transitRideLabel(
+  route: RouteSummary | undefined,
+  routeId: string | undefined,
+  mode: TransitEdgeSummary['mode'],
+) {
+  if (mode === 'bus') {
+    return `Bus ${route?.shortName ?? routeId ?? ''}`.trim()
+  }
+
+  if (mode === 'metro') {
+    return `Métro ligne ${route?.shortName ?? routeId ?? ''}`.trim()
+  }
+
+  return `REM ${route?.shortName?.replace(/^S/, 'A') ?? routeId?.replace(/^S/, 'A') ?? ''}`.trim()
 }
 
 function buildTransitSummary(segments: ItinerarySegment[]) {
@@ -763,26 +698,10 @@ function buildTransitSummary(segments: ItinerarySegment[]) {
   return `Marche + ${rideLabels.join(' + ')} + marche`
 }
 
-function addTransitEdge(graph: Map<string, TransitEdge[]>, from: string, edge: TransitEdge) {
-  const bucket = graph.get(from) ?? []
-  const duplicate = bucket.some(
-    (candidate) =>
-      candidate.to === edge.to &&
-      candidate.routeId === edge.routeId &&
-      candidate.kind === edge.kind &&
-      Math.abs(candidate.distanceKm - edge.distanceKm) < 0.02,
-  )
-
-  if (!duplicate) {
-    bucket.push(edge)
-    graph.set(from, bucket)
-  }
-}
-
 function buildSurfaceSegment(input: {
   id: string
   kind: 'walk' | 'bike'
-  mode: 'walking' | 'bixi'
+  mode: 'walking' | 'cycling' | 'bixi'
   label: string
   from: ItineraryPlace
   to: ItineraryPlace
@@ -827,12 +746,6 @@ function estimateWalkingDuration(distanceKm: number) {
   return (distanceKm / 4.8) * 60
 }
 
-function estimateRideDuration(distanceKm: number, mode: 'metro' | 'rem') {
-  const speedKmH = mode === 'rem' ? 40 : 30
-  const dwellMin = mode === 'rem' ? 0.7 : 1.1
-  return (distanceKm / speedKmH) * 60 + dwellMin
-}
-
 function toItineraryPlace(place: {
   label?: string
   name?: string
@@ -873,20 +786,13 @@ function mergeGeometries(
   return [...first, ...second]
 }
 
-function normalizeName(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLowerCase()
-    .trim()
-}
-
 function round1(value: number) {
   return Number(value.toFixed(1))
 }
 
-function modeLabel(mode: 'walking' | 'transit' | 'bixi') {
+function modeLabel(mode: ItineraryMode) {
   if (mode === 'walking') return 'Marche'
   if (mode === 'transit') return 'Transit'
+  if (mode === 'cycling') return 'Vélo'
   return 'BIXI'
 }
