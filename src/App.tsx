@@ -1287,7 +1287,9 @@ function App() {
                 ←
               </button>
             ) : (
-              <span className="search-leading">⌕</span>
+              <span className="search-leading brand-mark-badge" aria-hidden="true">
+                <img src="/brand-mark.svg" alt="" />
+              </span>
             )}
 
             {surfaceMode === 'route' ? (
