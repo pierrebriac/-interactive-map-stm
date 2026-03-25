@@ -413,6 +413,7 @@
 
 .status-dot.updating {
   background: #f0b14a;
+  animation: live-pulse 1.2s ease-in-out infinite;
 }
 
 .status-dot.stale {
@@ -555,6 +556,16 @@
   font-size: 0.78rem;
 }
 
+.saved-card-main {
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  display: grid;
+  gap: 0.16rem;
+  cursor: pointer;
+}
+
 .saved-list-item,
 .favorite-row {
   padding: 0.72rem 0.78rem;
@@ -599,6 +610,18 @@
 .permission-pill.prompt-dismissed {
   background: rgba(203, 124, 44, 0.12);
   color: var(--warning);
+}
+
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(240, 177, 74, 0.42);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(240, 177, 74, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(240, 177, 74, 0);
+  }
 }
 
 .mode-bus {

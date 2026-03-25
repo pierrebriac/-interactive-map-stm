@@ -19,6 +19,7 @@ import type {
   MapStyle,
   ResolvedPlace,
   RouteSummary,
+  SavedPlace,
   SearchItem,
   ShapeFeature,
   StationSummary,
@@ -47,6 +48,8 @@ interface MapViewProps {
   live: LiveResponse | null
   selectedItem: SearchItem | FavoriteItem | null
   selectedPlace: ResolvedPlace | null
+  savedPlaces: SavedPlace[]
+  currentLocation: ResolvedPlace | null
   itinerary: Itinerary | null
   viewMode: ViewMode
   mapStyle: MapStyle
@@ -65,6 +68,8 @@ export function MapView({
   live,
   selectedItem,
   selectedPlace,
+  savedPlaces,
+  currentLocation,
   itinerary,
   viewMode,
   mapStyle,
@@ -81,6 +86,8 @@ export function MapView({
     live,
     selectedItem,
     selectedPlace,
+    savedPlaces,
+    currentLocation,
     itinerary,
     viewMode,
     routeFocusIds,
@@ -93,12 +100,14 @@ export function MapView({
       live,
       selectedItem,
       selectedPlace,
+      savedPlaces,
+      currentLocation,
       itinerary,
       viewMode,
       routeFocusIds,
       onSelectItem,
     }
-  }, [bootstrap, live, onSelectItem, itinerary, routeFocusIds, selectedItem, selectedPlace, viewMode])
+  }, [bootstrap, currentLocation, live, onSelectItem, itinerary, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -122,8 +131,10 @@ export function MapView({
       const itinerarySource = map.getSource('itinerary-lines') as GeoJSONSource | undefined
       const itineraryPointSource = map.getSource('itinerary-points') as GeoJSONSource | undefined
       const placeSource = map.getSource('selected-place') as GeoJSONSource | undefined
+      const savedPlaceSource = map.getSource('saved-places') as GeoJSONSource | undefined
+      const currentLocationSource = map.getSource('current-location') as GeoJSONSource | undefined
 
-      if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource) {
+      if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource || !savedPlaceSource || !currentLocationSource) {
         return
       }
 
@@ -147,6 +158,8 @@ export function MapView({
       itinerarySource.setData(buildItineraryCollection(current.itinerary))
       itineraryPointSource.setData(buildItineraryPointCollection(current.itinerary))
       placeSource.setData(buildSelectedPlaceCollection(current.selectedPlace))
+      savedPlaceSource.setData(buildSavedPlaceCollection(current.savedPlaces))
+      currentLocationSource.setData(buildCurrentLocationCollection(current.currentLocation))
     }
 
     const selectRouteById = (routeId: string) => {
@@ -274,8 +287,10 @@ export function MapView({
     const itinerarySource = map.getSource('itinerary-lines') as GeoJSONSource | undefined
     const itineraryPointSource = map.getSource('itinerary-points') as GeoJSONSource | undefined
     const placeSource = map.getSource('selected-place') as GeoJSONSource | undefined
+    const savedPlaceSource = map.getSource('saved-places') as GeoJSONSource | undefined
+    const currentLocationSource = map.getSource('current-location') as GeoJSONSource | undefined
 
-    if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource) {
+    if (!routeSource || !stationSource || !busSource || !railSource || !itinerarySource || !itineraryPointSource || !placeSource || !savedPlaceSource || !currentLocationSource) {
       return
     }
 
@@ -286,7 +301,9 @@ export function MapView({
     itinerarySource.setData(buildItineraryCollection(itinerary))
     itineraryPointSource.setData(buildItineraryPointCollection(itinerary))
     placeSource.setData(buildSelectedPlaceCollection(selectedPlace))
-  }, [bootstrap, itinerary, live, routeFocusIds, selectedItem, selectedPlace, viewMode])
+    savedPlaceSource.setData(buildSavedPlaceCollection(savedPlaces))
+    currentLocationSource.setData(buildCurrentLocationCollection(currentLocation))
+  }, [bootstrap, currentLocation, itinerary, live, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     const map = mapRef.current
@@ -347,6 +364,8 @@ function ensureLayers(map: Map) {
   addGeoJsonSource(map, 'itinerary-lines', { ...EMPTY_COLLECTION })
   addGeoJsonSource(map, 'itinerary-points', { ...EMPTY_COLLECTION })
   addGeoJsonSource(map, 'selected-place', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'saved-places', { ...EMPTY_COLLECTION })
+  addGeoJsonSource(map, 'current-location', { ...EMPTY_COLLECTION })
 
   addLayerIfMissing(map, {
     id: 'route-lines',
@@ -541,6 +560,60 @@ function ensureLayers(map: Map) {
       'circle-color': '#111318',
       'circle-stroke-width': 3,
       'circle-stroke-color': '#f7f4ef',
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'saved-places',
+    type: 'circle',
+    source: 'saved-places',
+    paint: {
+      'circle-radius': ['coalesce', ['get', 'radius'], 7.8],
+      'circle-color': ['get', 'color'],
+      'circle-stroke-width': 2.6,
+      'circle-stroke-color': '#fffef8',
+      'circle-opacity': 0.92,
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'saved-place-labels',
+    type: 'symbol',
+    source: 'saved-places',
+    minzoom: 11,
+    layout: {
+      'text-field': ['get', 'label'],
+      'text-font': ['Open Sans Semibold'],
+      'text-size': 11,
+      'text-offset': [0, 1.2],
+    },
+    paint: {
+      'text-color': '#1c2c35',
+      'text-halo-color': '#fffef8',
+      'text-halo-width': 1.1,
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'current-location-ring',
+    type: 'circle',
+    source: 'current-location',
+    paint: {
+      'circle-radius': 14,
+      'circle-color': 'rgba(20, 104, 255, 0.18)',
+      'circle-stroke-width': 0,
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'current-location',
+    type: 'circle',
+    source: 'current-location',
+    paint: {
+      'circle-radius': 7.2,
+      'circle-color': '#1468ff',
+      'circle-stroke-width': 3,
+      'circle-stroke-color': '#fffef8',
     },
   })
 }
@@ -812,6 +885,52 @@ function buildSelectedPlaceCollection(
         geometry: {
           type: 'Point',
           coordinates: [selectedPlace.lon, selectedPlace.lat],
+        },
+        properties: {},
+      },
+    ],
+  }
+}
+
+function buildSavedPlaceCollection(savedPlaces: SavedPlace[]): FeatureCollection<Point> {
+  return {
+    type: 'FeatureCollection',
+    features: savedPlaces.map((place) => ({
+      type: 'Feature',
+      geometry: {
+        type: 'Point',
+        coordinates: [place.lon, place.lat],
+      },
+      properties: {
+        id: place.id,
+        label: place.name,
+        color:
+          place.kind === 'home'
+            ? '#ef4444'
+            : place.kind === 'work'
+              ? '#111318'
+              : '#1468ff',
+        radius: place.kind === 'saved' ? 6.6 : 8.4,
+      },
+    })),
+  }
+}
+
+function buildCurrentLocationCollection(
+  currentLocation: ResolvedPlace | null,
+): FeatureCollection<Point> {
+  if (!currentLocation) {
+    return EMPTY_COLLECTION
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Point',
+          coordinates: [currentLocation.lon, currentLocation.lat],
         },
         properties: {},
       },

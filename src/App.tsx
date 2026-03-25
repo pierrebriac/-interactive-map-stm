@@ -673,7 +673,9 @@ function App() {
   const workPlace = profile.savedPlaces.find((place) => place.kind === 'work') ?? null
   const extraPlaces = profile.savedPlaces.filter((place) => place.kind === 'saved')
   const effectiveLocationPreference =
-    browserLocationPreference === 'granted'
+    currentLocation
+      ? 'granted'
+      : browserLocationPreference === 'granted'
       ? 'granted'
       : profile.locationPreference !== 'unknown'
         ? profile.locationPreference
@@ -744,6 +746,21 @@ function App() {
     setSearchQuery(place.name)
     setIsSearchExpanded(false)
     await handleRouteToSavedPlace(place)
+  }
+
+  const handleFocusSavedPlace = (place: SavedPlace) => {
+    const resolved = toResolvedPlace(place)
+
+    startTransition(() => {
+      setSelectedPlace(resolved)
+      setSelectedItem(null)
+      setSurfaceMode('explore')
+      setSearchQuery(place.name)
+      setIsSearchExpanded(false)
+      if (isMobileViewport) {
+        setIsSidebarOpen(false)
+      }
+    })
   }
 
   const handleOpenRoute = (destination?: ResolvedPlace | SavedPlace | SearchItem) => {
@@ -1296,6 +1313,8 @@ function App() {
           live={live}
           selectedItem={selectedItem}
           selectedPlace={selectedPlace}
+          savedPlaces={profile.savedPlaces}
+          currentLocation={currentLocation}
           itinerary={selectedItinerary}
           viewMode={viewMode}
           mapStyle={mapStyle}
@@ -1479,7 +1498,7 @@ function App() {
 
               <div className="inline-actions">
                 <button className="primary-button" onClick={() => void handleResolveRouteInputs()}>
-                  Calculer le trajet
+                  {isPlanning ? 'Calcul en cours…' : 'Calculer le trajet'}
                 </button>
                 <button
                   className="ghost-button"
@@ -1612,6 +1631,7 @@ function App() {
           <small>
             {liveSummary.busRealtime} bus • {liveSummary.metroEstimated} métros • {liveSummary.remEstimated} REM
           </small>
+          <small>{liveStatusLine(live, isFetchingLive)}</small>
         </div>
       </main>
 
@@ -1701,6 +1721,7 @@ function App() {
               {homePlace ? (
                 <SavedPlaceCard
                   place={homePlace}
+                  onFocus={() => handleFocusSavedPlace(homePlace)}
                   onRoute={() => void handleRouteToSavedPlace(homePlace)}
                   onEditStart={() => handleStartEditSavedPlace(homePlace)}
                   onEditCancel={handleCancelEditSavedPlace}
@@ -1718,6 +1739,7 @@ function App() {
               {workPlace ? (
                 <SavedPlaceCard
                   place={workPlace}
+                  onFocus={() => handleFocusSavedPlace(workPlace)}
                   onRoute={() => void handleRouteToSavedPlace(workPlace)}
                   onEditStart={() => handleStartEditSavedPlace(workPlace)}
                   onEditCancel={handleCancelEditSavedPlace}
@@ -1739,6 +1761,7 @@ function App() {
                   <SavedPlaceListItem
                     key={place.id}
                     place={place}
+                    onFocus={() => handleFocusSavedPlace(place)}
                     onRoute={() => void handleRouteToSavedPlace(place)}
                     onEditStart={() => handleStartEditSavedPlace(place)}
                     onEditCancel={handleCancelEditSavedPlace}
@@ -2065,6 +2088,7 @@ function FavoriteRow({
 
 function SavedPlaceCard({
   place,
+  onFocus,
   onRoute,
   onEditStart,
   onEditCancel,
@@ -2076,6 +2100,7 @@ function SavedPlaceCard({
   editingError,
 }: {
   place: SavedPlace
+  onFocus: () => void
   onRoute: () => void
   onEditStart: () => void
   onEditCancel: () => void
@@ -2099,14 +2124,14 @@ function SavedPlaceCard({
         />
       ) : (
         <>
-          <div>
+          <button className="saved-card-main" onClick={onFocus}>
             <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
             <strong>{place.name}</strong>
             <small>{place.address}</small>
-          </div>
+          </button>
           <div className="inline-actions">
             <button className="secondary-button" onClick={onRoute}>
-              Y aller
+              Itinéraire
             </button>
             <button className="ghost-button" onClick={onEditStart}>
               Modifier
@@ -2123,6 +2148,7 @@ function SavedPlaceCard({
 
 function SavedPlaceListItem({
   place,
+  onFocus,
   onRoute,
   onEditStart,
   onEditCancel,
@@ -2134,6 +2160,7 @@ function SavedPlaceListItem({
   editingError,
 }: {
   place: SavedPlace
+  onFocus: () => void
   onRoute: () => void
   onEditStart: () => void
   onEditCancel: () => void
@@ -2157,12 +2184,15 @@ function SavedPlaceListItem({
         />
       ) : (
         <>
-          <button className="saved-list-main" onClick={onRoute}>
+          <button className="saved-list-main" onClick={onFocus}>
             <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
             <strong>{place.name}</strong>
             <small>{place.address}</small>
           </button>
           <div className="row-actions">
+            <button className="secondary-button compact-action" onClick={onRoute}>
+              Itinéraire
+            </button>
             <button className="ghost-button compact-action" onClick={onEditStart}>
               Modifier
             </button>
@@ -2415,6 +2445,25 @@ function locationPreferenceLabel(
   }
   if (preference === 'prompt-dismissed') return 'À confirmer'
   return 'Optionnelle'
+}
+
+function liveStatusLine(live: LiveResponse | null, isFetchingLive: boolean) {
+  if (isFetchingLive) {
+    return 'Actualisation en cours…'
+  }
+
+  const timestamp = live?.sourceTimestamp || live?.generatedAt
+  if (!timestamp) {
+    return 'Actualisation environ toutes les 8 secondes'
+  }
+
+  const formatted = new Intl.DateTimeFormat('fr-CA', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(timestamp))
+
+  return `Mis à jour à ${formatted} • environ toutes les 8 secondes`
 }
 
 function formatDistanceKm(distanceKm: number) {

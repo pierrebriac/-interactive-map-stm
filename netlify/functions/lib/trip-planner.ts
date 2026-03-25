@@ -59,59 +59,77 @@ export async function buildPlan(input: {
   toLon?: number | null
   modes?: ItineraryMode[]
 }) {
-  const origin = await resolvePlace({
-    query: input.from,
-    lat: input.fromLat,
-    lon: input.fromLon,
-    label: input.from,
-  })
-  const destination = await resolvePlace({
-    query: input.to,
-    lat: input.toLat,
-    lon: input.toLon,
-    label: input.to,
-  })
+  const [origin, destination] = await Promise.all([
+    resolvePlace({
+      query: input.from,
+      lat: input.fromLat,
+      lon: input.fromLon,
+      label: input.from,
+    }),
+    resolvePlace({
+      query: input.to,
+      lat: input.toLat,
+      lon: input.toLon,
+      label: input.to,
+    }),
+  ])
   const modes = input.modes && input.modes.length > 0
     ? Array.from(new Set(input.modes))
     : (['walking', 'transit', 'cycling', 'bixi'] as const)
 
-  const warnings: string[] = []
-  const itineraries: Itinerary[] = []
-
-  for (const mode of modes) {
-    try {
-      if (mode === 'walking') {
-        itineraries.push(await buildWalkingItinerary(origin, destination))
-        continue
-      }
-
-      if (mode === 'transit') {
-        const itinerary = await buildTransitItinerary(origin, destination)
-        if (itinerary) {
-          itineraries.push(itinerary)
-        } else {
-          warnings.push('Aucun itinéraire transit viable trouvé entre ces adresses.')
+  const results = await Promise.all(
+    modes.map(async (mode) => {
+      try {
+        if (mode === 'walking') {
+          return {
+            itineraries: [await buildWalkingItinerary(origin, destination)],
+            warnings: [] as string[],
+          }
         }
-        continue
-      }
 
-      if (mode === 'cycling') {
-        itineraries.push(await buildCyclingItinerary(origin, destination))
-        continue
-      }
+        if (mode === 'transit') {
+          const itinerary = await buildTransitItinerary(origin, destination)
+          return itinerary
+            ? {
+                itineraries: [itinerary],
+                warnings: [] as string[],
+              }
+            : {
+                itineraries: [] as Itinerary[],
+                warnings: ['Aucun itinéraire transit viable trouvé entre ces adresses.'],
+              }
+        }
 
-      const itinerary = await buildBixiItinerary(origin, destination)
-      if (itinerary) {
-        itineraries.push(itinerary)
-      } else {
-        warnings.push('Aucun itinéraire BIXI viable trouvé entre ces adresses.')
+        if (mode === 'cycling') {
+          return {
+            itineraries: [await buildCyclingItinerary(origin, destination)],
+            warnings: [] as string[],
+          }
+        }
+
+        const itinerary = await buildBixiItinerary(origin, destination)
+        return itinerary
+          ? {
+              itineraries: [itinerary],
+              warnings: [] as string[],
+            }
+          : {
+              itineraries: [] as Itinerary[],
+              warnings: ['Aucun itinéraire BIXI viable trouvé entre ces adresses.'],
+            }
+      } catch (error) {
+        return {
+          itineraries: [] as Itinerary[],
+          warnings: [
+            `${modeLabel(mode)} indisponible: ${error instanceof Error ? error.message : String(error)}`,
+          ],
+        }
       }
-    } catch (error) {
-      warnings.push(
-        `${modeLabel(mode)} indisponible: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-  }
+    }),
+  )
+
+  const warnings = results.flatMap((result) => result.warnings)
+  const itineraries = results.flatMap((result) => result.itineraries)
 
   itineraries.sort((left, right) => left.durationMin - right.durationMin)
 
