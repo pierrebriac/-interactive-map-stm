@@ -144,7 +144,10 @@ const fallbackLiveSnapshot: LiveSnapshot = {
 }
 
 const PROJECT_ROOT = process.cwd()
-const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url))
+const MODULE_DIRECTORY =
+  typeof __dirname === 'string'
+    ? __dirname
+    : dirname(fileURLToPath(import.meta.url))
 const SNAPSHOT_PATHS = Array.from(
   new Set([
     resolve(PROJECT_ROOT, 'generated/network-model.json'),
