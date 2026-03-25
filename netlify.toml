@@ -3,6 +3,9 @@
   publish = "dist"
   functions = "netlify/functions"
 
+[functions]
+  included_files = ["generated/network-model.json"]
+
 [[redirects]]
   from = "/api/bootstrap"
   to = "/.netlify/functions/bootstrap"

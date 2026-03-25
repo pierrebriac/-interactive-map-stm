@@ -26,17 +26,32 @@ async function apiRequest<T>(input: string, init?: RequestInit) {
   }
 
   if (!response.ok) {
-    const message =
-      payload &&
-      typeof payload === 'object' &&
-      'error' in payload &&
-      typeof payload.error === 'string'
-        ? payload.error
-        : rawText.trim() || `Erreur API (${response.status}).`
+    const message = formatApiErrorMessage(payload, rawText, response.status)
     throw new Error(message)
   }
 
   return payload as T
+}
+
+function formatApiErrorMessage(payload: unknown, rawText: string, status: number) {
+  if (payload && typeof payload === 'object') {
+    if ('error' in payload && typeof payload.error === 'string') {
+      return payload.error
+    }
+
+    if (
+      'errorType' in payload &&
+      payload.errorType === 'Runtime.OutOfMemory'
+    ) {
+      return 'Le serveur a manqué de mémoire pendant cette requête. Réessaie dans un instant.'
+    }
+
+    if ('errorMessage' in payload && typeof payload.errorMessage === 'string') {
+      return payload.errorMessage
+    }
+  }
+
+  return rawText.trim() || `Erreur API (${status}).`
 }
 
 export function fetchBootstrap() {

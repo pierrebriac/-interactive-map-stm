@@ -116,6 +116,9 @@ function App() {
   const [savePlaceKind, setSavePlaceKind] = useState<SavedPlace['kind']>('saved')
   const [savePlaceName, setSavePlaceName] = useState('')
   const [savePlaceError, setSavePlaceError] = useState<string | null>(null)
+  const [editingSavedPlaceId, setEditingSavedPlaceId] = useState<string | null>(null)
+  const [editingSavedPlaceName, setEditingSavedPlaceName] = useState('')
+  const [editingSavedPlaceError, setEditingSavedPlaceError] = useState<string | null>(null)
   const hasInitializedCameraRef = useRef(false)
 
   useEffect(() => {
@@ -341,6 +344,17 @@ function App() {
     setSavePlaceName(defaultSavedPlaceName(selectedPlace))
     setSavePlaceError(null)
   }, [selectedPlace])
+
+  useEffect(() => {
+    if (
+      editingSavedPlaceId &&
+      !profile.savedPlaces.some((place) => place.id === editingSavedPlaceId)
+    ) {
+      setEditingSavedPlaceId(null)
+      setEditingSavedPlaceName('')
+      setEditingSavedPlaceError(null)
+    }
+  }, [editingSavedPlaceId, profile.savedPlaces])
 
   useEffect(() => {
     if (!bootstrap) {
@@ -718,7 +732,7 @@ function App() {
       setSelectedPlace(place)
       setSelectedItem(null)
       setSurfaceMode('explore')
-      setSearchQuery(place.address)
+      setSearchQuery(routeInputDisplay(place))
       setIsSearchExpanded(false)
       if (isMobileViewport) {
         setIsSidebarOpen(false)
@@ -742,6 +756,10 @@ function App() {
         const place = toResolvedPlace(destination)
         setRouteDestination(place)
         setRouteDestinationQuery(routeInputDisplay(place))
+        setActiveRouteField('origin')
+      } else if (searchQuery.trim()) {
+        setRouteDestination(null)
+        setRouteDestinationQuery(searchQuery.trim())
         setActiveRouteField('origin')
       } else {
         setActiveRouteField(routeDestination ? 'origin' : 'destination')
@@ -811,6 +829,19 @@ function App() {
         : entry,
     )
     await persistFavorites(nextFavorites)
+  }
+
+  const handleRemoveFavorite = async (favorite: FavoriteItem) => {
+    if (!session?.token) {
+      openIdentity('login')
+      return
+    }
+
+    await persistFavorites(
+      favorites.filter(
+        (entry) => !(entry.type === favorite.type && entry.id === favorite.id),
+      ),
+    )
   }
 
   const persistFavorites = async (nextFavorites: FavoriteItem[]) => {
@@ -941,18 +972,26 @@ function App() {
     })
   }
 
-  const handleRenameSavedPlace = async (place: SavedPlace) => {
-    if (!session?.token || typeof window === 'undefined') {
+  const handleStartEditSavedPlace = (place: SavedPlace) => {
+    setEditingSavedPlaceId(place.id)
+    setEditingSavedPlaceName(place.name)
+    setEditingSavedPlaceError(null)
+  }
+
+  const handleCancelEditSavedPlace = () => {
+    setEditingSavedPlaceId(null)
+    setEditingSavedPlaceName('')
+    setEditingSavedPlaceError(null)
+  }
+
+  const handleSaveEditedSavedPlace = async (place: SavedPlace) => {
+    if (!session?.token) {
       return
     }
 
-    const nextName = window.prompt('Nom de cette adresse', place.name)
-    if (nextName === null) {
-      return
-    }
-
-    const trimmed = nextName.trim()
+    const trimmed = editingSavedPlaceName.trim()
     if (!trimmed) {
+      setEditingSavedPlaceError('Le nom ne peut pas être vide.')
       return
     }
 
@@ -962,6 +1001,8 @@ function App() {
         entry.id === place.id ? { ...entry, name: trimmed.slice(0, 60) } : entry,
       ),
     })
+
+    handleCancelEditSavedPlace()
   }
 
   const syncLocationPreference = async (preference: LocationPreference) => {
@@ -1661,8 +1702,14 @@ function App() {
                 <SavedPlaceCard
                   place={homePlace}
                   onRoute={() => void handleRouteToSavedPlace(homePlace)}
-                  onRename={() => void handleRenameSavedPlace(homePlace)}
+                  onEditStart={() => handleStartEditSavedPlace(homePlace)}
+                  onEditCancel={handleCancelEditSavedPlace}
+                  onEditSave={() => void handleSaveEditedSavedPlace(homePlace)}
+                  onEditNameChange={setEditingSavedPlaceName}
                   onDelete={() => void handleDeleteSavedPlace(homePlace.id)}
+                  isEditing={editingSavedPlaceId === homePlace.id}
+                  editingName={editingSavedPlaceName}
+                  editingError={editingSavedPlaceError}
                 />
               ) : (
                 <PlaceholderCard title="Domicile" body="Enregistre une adresse depuis la recherche." />
@@ -1672,8 +1719,14 @@ function App() {
                 <SavedPlaceCard
                   place={workPlace}
                   onRoute={() => void handleRouteToSavedPlace(workPlace)}
-                  onRename={() => void handleRenameSavedPlace(workPlace)}
+                  onEditStart={() => handleStartEditSavedPlace(workPlace)}
+                  onEditCancel={handleCancelEditSavedPlace}
+                  onEditSave={() => void handleSaveEditedSavedPlace(workPlace)}
+                  onEditNameChange={setEditingSavedPlaceName}
                   onDelete={() => void handleDeleteSavedPlace(workPlace.id)}
+                  isEditing={editingSavedPlaceId === workPlace.id}
+                  editingName={editingSavedPlaceName}
+                  editingError={editingSavedPlaceError}
                 />
               ) : (
                 <PlaceholderCard title="Travail" body="Ajoute ton travail pour lancer un trajet en un geste." />
@@ -1687,8 +1740,14 @@ function App() {
                     key={place.id}
                     place={place}
                     onRoute={() => void handleRouteToSavedPlace(place)}
-                    onRename={() => void handleRenameSavedPlace(place)}
+                    onEditStart={() => handleStartEditSavedPlace(place)}
+                    onEditCancel={handleCancelEditSavedPlace}
+                    onEditSave={() => void handleSaveEditedSavedPlace(place)}
+                    onEditNameChange={setEditingSavedPlaceName}
                     onDelete={() => void handleDeleteSavedPlace(place.id)}
+                    isEditing={editingSavedPlaceId === place.id}
+                    editingName={editingSavedPlaceName}
+                    editingError={editingSavedPlaceError}
                   />
                 ))}
               </div>
@@ -1875,6 +1934,7 @@ function App() {
                   live={live}
                   onFocus={() => handleSelectItem(favorite)}
                   onTogglePin={() => void handleToggleFavoritePin(favorite)}
+                  onRemove={() => void handleRemoveFavorite(favorite)}
                 />
               ))}
             </div>
@@ -1968,11 +2028,13 @@ function FavoriteRow({
   live,
   onFocus,
   onTogglePin,
+  onRemove,
 }: {
   favorite: FavoriteItem
   live: LiveResponse | null
   onFocus: () => void
   onTogglePin: () => void
+  onRemove: () => void
 }) {
   const entityCount = live?.entities.filter((entity) => entity.routeId === favorite.id).length ?? 0
   const state = live?.serviceStates.find((serviceState) => serviceState.routeId === favorite.id)
@@ -1987,41 +2049,13 @@ function FavoriteRow({
           {state ? ` • ${serviceStatusLabel(state.status)}` : ''}
         </span>
       </button>
-      {favorite.type === 'route' ? (
-        <button className={`pin-toggle ${favorite.pinnedToMap ? 'active' : ''}`} onClick={onTogglePin}>
-          {favorite.pinnedToMap ? 'Épinglé' : 'Afficher'}
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-function SavedPlaceCard({
-  place,
-  onRoute,
-  onRename,
-  onDelete,
-}: {
-  place: SavedPlace
-  onRoute: () => void
-  onRename: () => void
-  onDelete: () => void
-}) {
-  return (
-    <div className="saved-card">
-      <div>
-        <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
-        <strong>{place.name}</strong>
-        <small>{place.address}</small>
-      </div>
-      <div className="inline-actions">
-        <button className="secondary-button" onClick={onRoute}>
-          Y aller
-        </button>
-        <button className="ghost-button" onClick={onRename}>
-          Renommer
-        </button>
-        <button className="ghost-button" onClick={onDelete}>
+      <div className="row-actions">
+        {favorite.type === 'route' ? (
+          <button className={`pin-toggle ${favorite.pinnedToMap ? 'active' : ''}`} onClick={onTogglePin}>
+            {favorite.pinnedToMap ? 'Épinglé' : 'Afficher'}
+          </button>
+        ) : null}
+        <button className="ghost-button compact-action" onClick={onRemove}>
           Retirer
         </button>
       </div>
@@ -2029,30 +2063,155 @@ function SavedPlaceCard({
   )
 }
 
-function SavedPlaceListItem({
+function SavedPlaceCard({
   place,
   onRoute,
-  onRename,
+  onEditStart,
+  onEditCancel,
+  onEditSave,
+  onEditNameChange,
   onDelete,
+  isEditing,
+  editingName,
+  editingError,
 }: {
   place: SavedPlace
   onRoute: () => void
-  onRename: () => void
+  onEditStart: () => void
+  onEditCancel: () => void
+  onEditSave: () => void
+  onEditNameChange: (value: string) => void
   onDelete: () => void
+  isEditing: boolean
+  editingName: string
+  editingError: string | null
+}) {
+  return (
+    <div className="saved-card">
+      {isEditing ? (
+        <SavedPlaceEditor
+          place={place}
+          value={editingName}
+          error={editingError}
+          onChange={onEditNameChange}
+          onSave={onEditSave}
+          onCancel={onEditCancel}
+        />
+      ) : (
+        <>
+          <div>
+            <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
+            <strong>{place.name}</strong>
+            <small>{place.address}</small>
+          </div>
+          <div className="inline-actions">
+            <button className="secondary-button" onClick={onRoute}>
+              Y aller
+            </button>
+            <button className="ghost-button" onClick={onEditStart}>
+              Modifier
+            </button>
+            <button className="ghost-button" onClick={onDelete}>
+              Retirer
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SavedPlaceListItem({
+  place,
+  onRoute,
+  onEditStart,
+  onEditCancel,
+  onEditSave,
+  onEditNameChange,
+  onDelete,
+  isEditing,
+  editingName,
+  editingError,
+}: {
+  place: SavedPlace
+  onRoute: () => void
+  onEditStart: () => void
+  onEditCancel: () => void
+  onEditSave: () => void
+  onEditNameChange: (value: string) => void
+  onDelete: () => void
+  isEditing: boolean
+  editingName: string
+  editingError: string | null
 }) {
   return (
     <div className="saved-list-item">
-      <button className="saved-list-main" onClick={onRoute}>
-        <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
-        <strong>{place.name}</strong>
-        <small>{place.address}</small>
-      </button>
-      <button className="ghost-button" onClick={onRename}>
-        Renommer
-      </button>
-      <button className="ghost-button" onClick={onDelete}>
-        Retirer
-      </button>
+      {isEditing ? (
+        <SavedPlaceEditor
+          place={place}
+          value={editingName}
+          error={editingError}
+          onChange={onEditNameChange}
+          onSave={onEditSave}
+          onCancel={onEditCancel}
+        />
+      ) : (
+        <>
+          <button className="saved-list-main" onClick={onRoute}>
+            <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
+            <strong>{place.name}</strong>
+            <small>{place.address}</small>
+          </button>
+          <div className="row-actions">
+            <button className="ghost-button compact-action" onClick={onEditStart}>
+              Modifier
+            </button>
+            <button className="ghost-button compact-action" onClick={onDelete}>
+              Retirer
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SavedPlaceEditor({
+  place,
+  value,
+  error,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  place: SavedPlace
+  value: string
+  error: string | null
+  onChange: (value: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="saved-place-editor">
+      <span className="saved-place-kind">{savedPlaceKindLabel(place.kind)}</span>
+      <label className="profile-field compact-field">
+        <span>Nom visible</span>
+        <input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Nom de cette adresse"
+        />
+      </label>
+      <small>{place.address}</small>
+      {error ? <p className="panel-copy">{error}</p> : null}
+      <div className="inline-actions">
+        <button className="secondary-button" onClick={onSave}>
+          Enregistrer
+        </button>
+        <button className="ghost-button" onClick={onCancel}>
+          Annuler
+        </button>
+      </div>
     </div>
   )
 }
@@ -2152,6 +2311,10 @@ function toResolvedPlace(
 function routeInputDisplay(place: ResolvedPlace) {
   if (place.label === CURRENT_LOCATION_PLACEHOLDER) {
     return CURRENT_LOCATION_PLACEHOLDER
+  }
+
+  if (place.placeType === 'address' && extractStreetNumber(place.label)) {
+    return place.label
   }
 
   if (place.placeType === 'station' || place.placeType === 'route') {
@@ -2276,6 +2439,10 @@ function normalizeRouteText(value: string) {
 
 function createRequestId(prefix: string) {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+}
+
+function extractStreetNumber(value: string) {
+  return value.match(/\b\d{1,6}\b/u)?.[0] ?? null
 }
 
 function savedPlaceKindLabel(kind: SavedPlace['kind']) {

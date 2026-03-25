@@ -302,7 +302,8 @@
 .inline-actions,
 .mode-switch,
 .mini-steps,
-.saved-place-grid {
+.saved-place-grid,
+.row-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
@@ -537,6 +538,21 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface-muted) 86%, var(--surface));
+}
+
+.saved-place-editor {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.compact-field {
+  padding: 0.65rem 0.72rem;
+}
+
+.compact-action {
+  min-height: 2rem;
+  padding: 0.45rem 0.72rem;
+  font-size: 0.78rem;
 }
 
 .saved-list-item,

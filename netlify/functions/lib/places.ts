@@ -7,6 +7,75 @@ import type {
 
 const MONTREAL_BBOX = [-74.15, 45.35, -73.35, 45.75] as const
 const MONTREAL_PROXIMITY = [-73.5673, 45.5017] as const
+const MONTREAL_CIVIC_RESOURCE_ID = 'fed5fd02-5535-458e-b13f-66e7a31a6d78'
+const MONTREAL_CIVIC_API_URL =
+  'https://www.donneesquebec.ca/recherche/api/3/action/datastore_search'
+const MONTREAL_CIVIC_CACHE_TTL_MS = 1000 * 60 * 30
+const MONTREAL_CIVIC_PAGE_SIZE = 250
+const MONTREAL_CIVIC_MAX_ROWS = 1000
+
+const STREET_TYPE_ALIASES = new Map<string, string>([
+  ['av', 'avenue'],
+  ['ave', 'avenue'],
+  ['avenue', 'avenue'],
+  ['aut', 'autoroute'],
+  ['autoroute', 'autoroute'],
+  ['bd', 'boulevard'],
+  ['boul', 'boulevard'],
+  ['boulevard', 'boulevard'],
+  ['carre', 'carré'],
+  ['carre.', 'carré'],
+  ['carré', 'carré'],
+  ['ch', 'chemin'],
+  ['chemin', 'chemin'],
+  ['crois', 'croissant'],
+  ['croissant', 'croissant'],
+  ['imp', 'impasse'],
+  ['impasse', 'impasse'],
+  ['montee', 'montée'],
+  ['montée', 'montée'],
+  ['pl', 'place'],
+  ['place', 'place'],
+  ['prom', 'promenade'],
+  ['promenade', 'promenade'],
+  ['rte', 'route'],
+  ['route', 'route'],
+  ['ruelle', 'ruelle'],
+  ['rue', 'rue'],
+  ['terr', 'terrasse'],
+  ['terrasse', 'terrasse'],
+])
+
+const STREET_LINK_WORDS = new Set([
+  'd',
+  'de',
+  'des',
+  'du',
+  'l',
+  'la',
+  'le',
+  'les',
+])
+
+const ORIENTATION_ALIASES = new Map<string, string>([
+  ['e', 'E'],
+  ['est', 'E'],
+  ['n', 'N'],
+  ['nord', 'N'],
+  ['o', 'O'],
+  ['ouest', 'O'],
+  ['s', 'S'],
+  ['sud', 'S'],
+  ['x', 'X'],
+])
+
+const civicLookupCache = new Map<
+  string,
+  {
+    expiresAt: number
+    value: ResolvedPlace[]
+  }
+>()
 
 interface MapTilerGeocodeFeature {
   id?: string
@@ -47,6 +116,33 @@ interface OrsFeatureCollection {
       }
     }
   }>
+}
+
+interface MontrealCivicRecord {
+  ID_ADRESSE?: string
+  SPECIFIQUE?: string
+  ORIENTATION?: string
+  LIEN?: string | null
+  GENERIQUE?: string
+  ADDR_DE?: string
+  ADDR_A?: string
+  LONGITUDE?: string
+  LATITUDE?: string
+}
+
+interface MontrealCivicResponse {
+  success?: boolean
+  result?: {
+    total?: number
+    records?: MontrealCivicRecord[]
+  }
+}
+
+interface StreetDescriptor {
+  generic: string
+  specific: string
+  orientation: string | null
+  normalizedStreet: string
 }
 
 export interface RoutedSurface {
@@ -94,7 +190,24 @@ export async function geocodePlaces(query: string, limit = 6) {
     }
   }
 
-  features = rankResolvedPlaces(trimmed, features)
+  if (containsStreetNumber(trimmed) && !hasExactStreetNumberMatch(trimmed, features)) {
+    const civicMatches = await geocodeWithMontrealCivic(trimmed, features, limit).catch(
+      (error) => {
+        warnings.push(
+          error instanceof Error
+            ? `Adresse civique Montréal indisponible: ${error.message}`
+            : 'Adresse civique Montréal indisponible.',
+        )
+        return [] as ResolvedPlace[]
+      },
+    )
+
+    if (civicMatches.length > 0) {
+      features = dedupeResolvedPlaces([...civicMatches, ...features])
+    }
+  }
+
+  features = rankResolvedPlaces(trimmed, features).slice(0, Math.min(Math.max(limit, 1), 10))
 
   return {
     generatedAt: new Date().toISOString(),
@@ -337,6 +450,86 @@ async function geocodeWithNominatim(query: string, limit: number) {
     )
 }
 
+async function geocodeWithMontrealCivic(
+  query: string,
+  seedPlaces: ResolvedPlace[],
+  limit: number,
+) {
+  const cached = civicLookupCache.get(query)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value.slice(0, limit)
+  }
+
+  const descriptors = buildStreetDescriptors(query, seedPlaces)
+  const houseNumber = parseStreetNumber(query)
+  if (!houseNumber || descriptors.length === 0) {
+    return []
+  }
+
+  const exactMatches: Array<{
+    descriptor: StreetDescriptor
+    row: MontrealCivicRecord
+    distanceToRange: number
+    exact: boolean
+  }> = []
+  const approximateMatches: Array<{
+    descriptor: StreetDescriptor
+    row: MontrealCivicRecord
+    distanceToRange: number
+    exact: boolean
+  }> = []
+
+  for (const descriptor of descriptors) {
+    const rows = await fetchMontrealStreetRows(descriptor)
+    if (rows.length === 0) {
+      continue
+    }
+
+    for (const row of rows) {
+      const range = parseCivicRange(row.ADDR_DE, row.ADDR_A)
+      if (!range) {
+        continue
+      }
+
+      const distanceToRange =
+        houseNumber < range.min
+          ? range.min - houseNumber
+          : houseNumber > range.max
+            ? houseNumber - range.max
+            : 0
+
+      const candidate = {
+        descriptor,
+        row,
+        distanceToRange,
+        exact: distanceToRange === 0,
+      }
+
+      if (candidate.exact) {
+        exactMatches.push(candidate)
+      } else {
+        approximateMatches.push(candidate)
+      }
+    }
+
+    if (exactMatches.length > 0) {
+      break
+    }
+  }
+
+  const chosen = (exactMatches.length > 0 ? exactMatches : approximateMatches)
+    .sort((left, right) => left.distanceToRange - right.distanceToRange)
+    .slice(0, exactMatches.length > 0 ? Math.min(Math.max(limit, 1), 4) : 1)
+    .map((candidate) => toMontrealCivicPlace(houseNumber, candidate))
+
+  civicLookupCache.set(query, {
+    expiresAt: Date.now() + MONTREAL_CIVIC_CACHE_TTL_MS,
+    value: chosen,
+  })
+
+  return chosen
+}
+
 function shouldUseNominatimFallback(query: string, features: ResolvedPlace[]) {
   if (features.length === 0) {
     return true
@@ -366,12 +559,42 @@ function shouldUseNominatimFallback(query: string, features: ResolvedPlace[]) {
   return false
 }
 
+function hasExactStreetNumberMatch(query: string, features: ResolvedPlace[]) {
+  const houseNumber = extractStreetNumber(query)
+  if (!houseNumber) {
+    return false
+  }
+
+  return features.some((feature) => {
+    const haystack = normalizeLooseText(`${feature.label} ${feature.address}`)
+    return feature.placeType === 'address' && haystack.includes(houseNumber)
+  })
+}
+
 function normalizeLooseText(value: string) {
   return value
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
     .trim()
+}
+
+function dedupeResolvedPlaces(features: ResolvedPlace[]) {
+  const deduped = new Map<string, ResolvedPlace>()
+
+  for (const feature of features) {
+    const key = [
+      normalizeLooseText(feature.label),
+      normalizeLooseText(feature.address),
+      feature.lat.toFixed(5),
+      feature.lon.toFixed(5),
+    ].join(':')
+    if (!deduped.has(key)) {
+      deduped.set(key, feature)
+    }
+  }
+
+  return Array.from(deduped.values())
 }
 
 async function routeSurfaceWithOsrm(
@@ -440,6 +663,10 @@ function scoreResolvedPlace(query: string, place: ResolvedPlace) {
     score += 4
   }
 
+  if (houseNumber && place.placeType === 'address' && normalizeLooseText(place.label).startsWith(houseNumber)) {
+    score += 6
+  }
+
   const matchedTokens = queryTokens.filter((token) => normalizedAddress.includes(token)).length
   score += matchedTokens * 0.2
 
@@ -469,6 +696,191 @@ function mergePlaceWithQuery(place: ResolvedPlace, query: string) {
     label,
     address: trimmed,
   } satisfies ResolvedPlace
+}
+
+async function fetchMontrealStreetRows(descriptor: StreetDescriptor) {
+  const rows: MontrealCivicRecord[] = []
+  let offset = 0
+  let total = Number.POSITIVE_INFINITY
+
+  while (offset < total && offset < MONTREAL_CIVIC_MAX_ROWS) {
+    const url = new URL(MONTREAL_CIVIC_API_URL)
+    url.searchParams.set('resource_id', MONTREAL_CIVIC_RESOURCE_ID)
+    url.searchParams.set('limit', String(MONTREAL_CIVIC_PAGE_SIZE))
+    url.searchParams.set('offset', String(offset))
+    url.searchParams.set(
+      'filters',
+      JSON.stringify({
+        SPECIFIQUE: descriptor.specific,
+        GENERIQUE: descriptor.generic,
+      }),
+    )
+
+    const response = await fetch(url, {
+      headers: {
+        'user-agent': 'TransitAtlas/1.0',
+      },
+      signal: AbortSignal.timeout(3000),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Données Québec a répondu ${response.status}`)
+    }
+
+    const payload = (await response.json()) as MontrealCivicResponse
+    const result = payload.result
+    const pageRows = result?.records ?? []
+    total = result?.total ?? pageRows.length
+    rows.push(...pageRows)
+
+    if (pageRows.length < MONTREAL_CIVIC_PAGE_SIZE) {
+      break
+    }
+
+    offset += MONTREAL_CIVIC_PAGE_SIZE
+  }
+
+  return rows
+}
+
+function buildStreetDescriptors(query: string, seedPlaces: ResolvedPlace[]) {
+  const seeds = [
+    ...seedPlaces.slice(0, 3).flatMap((place) => [place.label, place.address]),
+    query,
+  ]
+  const descriptors = new Map<string, StreetDescriptor>()
+
+  for (const seed of seeds) {
+    const descriptor = parseStreetDescriptor(seed)
+    if (!descriptor) {
+      continue
+    }
+
+    descriptors.set(
+      `${descriptor.generic}:${descriptor.specific}:${descriptor.orientation ?? 'X'}`,
+      descriptor,
+    )
+  }
+
+  return Array.from(descriptors.values())
+}
+
+function parseStreetDescriptor(value: string) {
+  const firstPart = value
+    .split(',')[0]
+    .replace(/\s+/g, ' ')
+    .replace(/^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+/u, '')
+    .trim()
+
+  if (!firstPart) {
+    return null
+  }
+
+  const tokens = firstPart.split(/\s+/).filter(Boolean)
+  const generic = canonicalStreetType(tokens[0])
+  if (!generic) {
+    return null
+  }
+
+  const remainder = [...tokens.slice(1)]
+  const orientation = remainder.length > 0 ? canonicalOrientation(remainder.at(-1) ?? '') : null
+  if (orientation) {
+    remainder.pop()
+  }
+
+  while (remainder.length > 0 && STREET_LINK_WORDS.has(normalizeLooseText(remainder[0]))) {
+    remainder.shift()
+  }
+
+  const specific = remainder.join(' ').trim()
+  if (!specific) {
+    return null
+  }
+
+  const normalizedStreet = normalizeLooseText(
+    `${generic} ${specific} ${orientation && orientation !== 'X' ? orientation : ''}`,
+  )
+
+  return {
+    generic,
+    specific,
+    orientation,
+    normalizedStreet,
+  } satisfies StreetDescriptor
+}
+
+function canonicalStreetType(value: string) {
+  return STREET_TYPE_ALIASES.get(normalizeLooseText(value).replace(/\./g, '')) ?? null
+}
+
+function canonicalOrientation(value: string) {
+  return ORIENTATION_ALIASES.get(normalizeLooseText(value)) ?? null
+}
+
+function parseStreetNumber(value: string) {
+  const digits = extractStreetNumber(value)
+  return digits ? Number.parseInt(digits, 10) : null
+}
+
+function parseCivicRange(minValue?: string, maxValue?: string) {
+  const min = parseStreetNumber(minValue ?? '')
+  const max = parseStreetNumber(maxValue ?? '')
+
+  if (!min && !max) {
+    return null
+  }
+
+  const safeMin = min ?? max ?? 0
+  const safeMax = max ?? min ?? safeMin
+
+  return {
+    min: Math.min(safeMin, safeMax),
+    max: Math.max(safeMin, safeMax),
+  }
+}
+
+function toMontrealCivicPlace(
+  houseNumber: number,
+  candidate: {
+    descriptor: StreetDescriptor
+    row: MontrealCivicRecord
+    distanceToRange: number
+    exact: boolean
+  },
+) {
+  const label = `${houseNumber} ${formatStreetName(candidate.row)}`.replace(/\s+/g, ' ').trim()
+  const address = candidate.exact
+    ? `${label}, Montréal, Québec, Canada`
+    : `${label}, Montréal, Québec, Canada • adresse approchée`
+
+  return {
+    id: `mtl-civic:${candidate.row.ID_ADRESSE ?? label}`,
+    label,
+    address,
+    placeType: 'address',
+    relevance: candidate.exact ? 0.99 : Math.max(0.72, 0.9 - candidate.distanceToRange / 1000),
+    lon: Number.parseFloat(candidate.row.LONGITUDE || ''),
+    lat: Number.parseFloat(candidate.row.LATITUDE || ''),
+  } satisfies ResolvedPlace
+}
+
+function formatStreetName(row: MontrealCivicRecord) {
+  const parts = [
+    row.GENERIQUE ? capitalizeStreetPart(row.GENERIQUE) : '',
+    row.LIEN && row.LIEN !== 'X' ? row.LIEN.toLowerCase() : '',
+    row.SPECIFIQUE ?? '',
+    row.ORIENTATION && row.ORIENTATION !== 'X' ? row.ORIENTATION : '',
+  ].filter(Boolean)
+
+  return parts.join(' ')
+}
+
+function capitalizeStreetPart(value: string) {
+  if (!value) {
+    return value
+  }
+
+  return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
 function containsStreetNumber(value: string) {

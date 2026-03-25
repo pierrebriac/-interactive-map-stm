@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as cheerio from 'cheerio'
 import gtfsRealtimeBindings from 'gtfs-realtime-bindings'
 import JSZip from 'jszip'
@@ -143,7 +144,15 @@ const fallbackLiveSnapshot: LiveSnapshot = {
 }
 
 const PROJECT_ROOT = process.cwd()
-const SNAPSHOT_PATH = resolve(PROJECT_ROOT, 'generated/network-model.json')
+const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url))
+const SNAPSHOT_PATHS = Array.from(
+  new Set([
+    resolve(PROJECT_ROOT, 'generated/network-model.json'),
+    resolve(MODULE_DIRECTORY, '../../../generated/network-model.json'),
+    resolve(MODULE_DIRECTORY, '../../../../generated/network-model.json'),
+  ]),
+)
+const PRIMARY_SNAPSHOT_PATH = SNAPSHOT_PATHS[0]
 
 export async function getBootstrapData() {
   const model = await getInternalModel()
@@ -160,7 +169,7 @@ export async function getTransitPlanningData() {
   }
 }
 
-export async function prepareModelSnapshot(snapshotPath = SNAPSHOT_PATH) {
+export async function prepareModelSnapshot(snapshotPath = PRIMARY_SNAPSHOT_PATH) {
   const model = await buildStaticModel()
   const serialized = serializeModel(model)
 
@@ -324,7 +333,13 @@ async function getInternalModel(): Promise<InternalModel> {
   }
 
   staticModelPromise = loadSnapshotModel()
-    .catch(() => buildStaticModel())
+    .catch((error) => {
+      if (shouldAvoidRuntimeModelBuild()) {
+        throw error
+      }
+
+      return buildStaticModel()
+    })
     .then((value) => {
       value.bootstrap.styles = getStyleOptions()
       staticModelCache = {
@@ -343,14 +358,34 @@ async function getInternalModel(): Promise<InternalModel> {
 }
 
 async function loadSnapshotModel() {
-  const raw = await readFile(SNAPSHOT_PATH, 'utf8')
-  const serialized = JSON.parse(raw) as SerializedModel
-  const model = applyRuntimeBootstrapSettings(hydrateModel(serialized))
-  if (model.transitStopsById.size === 0 || model.transitEdges.length === 0) {
-    throw new Error('Transit planning snapshot missing enriched stop graph.')
+  let lastError: unknown
+
+  for (const snapshotPath of SNAPSHOT_PATHS) {
+    try {
+      const raw = await readFile(snapshotPath, 'utf8')
+      const serialized = JSON.parse(raw) as SerializedModel
+      const model = applyRuntimeBootstrapSettings(hydrateModel(serialized))
+      if (model.transitStopsById.size === 0 || model.transitEdges.length === 0) {
+        throw new Error('Transit planning snapshot missing enriched stop graph.')
+      }
+
+      return model
+    } catch (error) {
+      lastError = error
+    }
   }
 
-  return model
+  throw lastError instanceof Error
+    ? new Error(`Snapshot réseau introuvable: ${lastError.message}`)
+    : new Error('Snapshot réseau introuvable.')
+}
+
+function shouldAvoidRuntimeModelBuild() {
+  if (process.env.NETLIFY_LOCAL === 'true') {
+    return false
+  }
+
+  return Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
 }
 
 async function getLiveSnapshot(model: InternalModel): Promise<LiveSnapshot> {
