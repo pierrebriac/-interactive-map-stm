@@ -26,6 +26,7 @@ import {
   openIdentity,
   subscribeToIdentity,
 } from './lib/auth.ts'
+import { haversineKm } from './shared/geo.ts'
 import { searchItems } from './lib/search.ts'
 import type {
   BootstrapResponse,
@@ -49,6 +50,7 @@ import type {
 type SurfaceMode = 'home' | 'explore' | 'route'
 type RoutePanelMode = 'transit' | 'walking' | 'cycling'
 type RouteField = 'origin' | 'destination'
+type LiveMapScope = 'network' | 'focus'
 
 const DEFAULT_PROFILE: UserProfile = {
   displayName: '',
@@ -57,6 +59,7 @@ const DEFAULT_PROFILE: UserProfile = {
 }
 
 const CURRENT_LOCATION_PLACEHOLDER = 'Ma position'
+const ACCOUNT_CACHE_PREFIX = 'transit-atlas-account'
 
 function App() {
   const initialMobile =
@@ -75,6 +78,9 @@ function App() {
   const [selectedPlace, setSelectedPlace] = useState<ResolvedPlace | null>(null)
   const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>('home')
   const [viewMode, setViewMode] = useState<ViewMode>('combined')
+  const [mapLiveScope, setMapLiveScope] = useState<LiveMapScope>(
+    initialMobile ? 'focus' : 'network',
+  )
   const [mapStyle, setMapStyle] = useState<MapStyle>('streets')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window === 'undefined') return 'light'
@@ -185,8 +191,14 @@ function App() {
         return
       }
 
+      const cachedAccount = readAccountCache(session.id)
+      if (cachedAccount) {
+        setFavorites(cachedAccount.favorites)
+        setProfile(cachedAccount.profile)
+      }
+
       try {
-        const [favoritesResponse, profileResponse] = await Promise.all([
+        const [favoritesResult, profileResult] = await Promise.allSettled([
           fetchFavorites(token),
           fetchProfile(token),
         ])
@@ -195,9 +207,39 @@ function App() {
           return
         }
 
-        setFavorites(favoritesResponse.favorites)
-        setProfile(profileResponse.profile)
-        setAppError(null)
+        const nextFavorites =
+          favoritesResult.status === 'fulfilled'
+            ? favoritesResult.value.favorites
+            : cachedAccount?.favorites ?? []
+        const nextProfile =
+          profileResult.status === 'fulfilled'
+            ? profileResult.value.profile
+            : cachedAccount?.profile ?? DEFAULT_PROFILE
+
+        setFavorites(nextFavorites)
+        setProfile(nextProfile)
+
+        if (
+          favoritesResult.status === 'fulfilled' ||
+          profileResult.status === 'fulfilled'
+        ) {
+          writeAccountCache(session.id, {
+            favorites: nextFavorites,
+            profile: nextProfile,
+          })
+          setAppError((value) =>
+            value === 'Impossible de charger le profil utilisateur.' ? null : value,
+          )
+          return
+        }
+
+        setAppError(
+          favoritesResult.reason instanceof Error
+            ? favoritesResult.reason.message
+            : profileResult.status === 'rejected' && profileResult.reason instanceof Error
+              ? profileResult.reason.message
+              : 'Impossible de charger le profil utilisateur.',
+        )
       } catch (error) {
         if (!cancelled) {
           setAppError(
@@ -214,7 +256,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [session?.token])
+  }, [session?.id, session?.token])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -369,17 +411,21 @@ function App() {
 
       try {
         const data = await fetchLiveData({
-          modes: deriveModes(viewMode, selectedItem, selectedItinerary),
-          routeIds: routeFocusIds,
-          stationId: selectedStationId,
+          modes: ['bus', 'metro', 'rem'],
         })
 
         if (!cancelled) {
-          setLive(data)
+          setLive((previous) => stabilizeLiveResponse(previous, data))
+          setAppError((value) =>
+            value === 'Impossible de rafraîchir les données live.'
+              ? null
+              : value,
+          )
         }
       } catch (error) {
         if (!cancelled) {
           console.error(error)
+          setAppError('Impossible de rafraîchir les données live.')
         }
       } finally {
         if (!cancelled) {
@@ -397,7 +443,7 @@ function App() {
       cancelled = true
       window.clearInterval(intervalId)
     }
-  }, [bootstrap, routeFocusIds, selectedItem, selectedItinerary, selectedStationId, viewMode])
+  }, [bootstrap])
 
   const networkSearchResults = useMemo(
     () =>
@@ -663,8 +709,26 @@ function App() {
     [deferredSearchQuery, networkSearchResults, profile.savedPlaces, searchPlaces],
   )
 
-  const serviceStatusSummary = summarizeServiceStates(live?.serviceStates ?? [])
+  const contextualLive = useMemo(
+    () =>
+      filterLiveResponse(live, bootstrap, {
+        modes: deriveModes(viewMode, selectedItem, selectedItinerary),
+        routeIds: routeFocusIds,
+        selectedStation,
+      }),
+    [bootstrap, live, routeFocusIds, selectedItem, selectedItinerary, selectedStation, viewMode],
+  )
+  const networkLive = useMemo(
+    () =>
+      filterLiveResponse(live, bootstrap, {
+        modes: modesFromViewMode(viewMode),
+      }),
+    [bootstrap, live, viewMode],
+  )
+  const mapLive = mapLiveScope === 'network' ? networkLive : contextualLive
+  const serviceStatusSummary = summarizeServiceStates(mapLive?.serviceStates ?? [])
   const liveSummary = summarizeLiveEntities(live?.entities ?? [])
+  const mapLiveSummary = summarizeLiveEntities(mapLive?.entities ?? [])
   const styleOptions = bootstrap?.styles ?? [
     { id: 'streets' as const, label: '2D', available: true },
     { id: 'satellite' as const, label: 'Aérien', available: false },
@@ -873,6 +937,9 @@ function App() {
     try {
       const response = await saveFavorites(session.token, nextFavorites)
       setFavorites(response.favorites)
+      writeAccountCache(session.id, {
+        favorites: response.favorites,
+      })
     } catch (error) {
       setFavorites(previousFavorites)
       setAppError(
@@ -897,6 +964,9 @@ function App() {
     try {
       const response = await saveProfile(session.token, nextProfile)
       setProfile(response.profile)
+      writeAccountCache(session.id, {
+        profile: response.profile,
+      })
     } catch (error) {
       setProfile(previousProfile)
       setAppError(
@@ -1296,6 +1366,29 @@ function App() {
     setSelectedItineraryId(itineraryId)
   }
 
+  const handlePreviewSelectedItinerary = () => {
+    if (!selectedItinerary) {
+      return
+    }
+
+    const points = selectedItinerary.segments.flatMap((segment) => segment.geometry)
+    if (points.length === 0) {
+      return
+    }
+
+    setCameraRequest({
+      id: createRequestId('preview-itinerary'),
+      kind: 'bounds',
+      points,
+      padding: isMobileViewport ? 96 : 132,
+      duration: 760,
+    })
+
+    if (isMobileViewport) {
+      setIsSidebarOpen(false)
+    }
+  }
+
   const searchPopoverVisible =
     isSearchExpanded ||
     surfaceMode === 'route' ||
@@ -1310,13 +1403,14 @@ function App() {
       <main className="map-panel">
         <MapView
           bootstrap={bootstrap}
-          live={live}
+          live={mapLive}
           selectedItem={selectedItem}
           selectedPlace={selectedPlace}
           savedPlaces={profile.savedPlaces}
           currentLocation={currentLocation}
           itinerary={selectedItinerary}
           viewMode={viewMode}
+          liveScope={mapLiveScope}
           mapStyle={mapStyle}
           routeFocusIds={routeFocusIds}
           cameraRequest={cameraRequest}
@@ -1716,6 +1810,20 @@ function App() {
               <span className="panel-copy">{profile.savedPlaces.length} adresses</span>
             </div>
             <p className="panel-copy">Garde ici ton domicile, ton travail et jusqu’à 20 lieux nommés.</p>
+            <div className="section-actions">
+              <button
+                className="secondary-button compact-action"
+                onClick={() => handleStartSaveSelectedPlace('saved')}
+                disabled={!selectedPlace}
+              >
+                {selectedPlace ? 'Enregistrer la sélection' : 'Sélectionne une adresse'}
+              </button>
+              <span className="panel-copy">
+                {selectedPlace
+                  ? `Prêt à enregistrer: ${routeInputDisplay(selectedPlace)}`
+                  : 'Choisis une adresse sur la carte ou dans la recherche pour l’ajouter.'}
+              </span>
+            </div>
 
             <div className="saved-place-grid">
               {homePlace ? (
@@ -1733,7 +1841,16 @@ function App() {
                   editingError={editingSavedPlaceError}
                 />
               ) : (
-                <PlaceholderCard title="Domicile" body="Enregistre une adresse depuis la recherche." />
+                <PlaceholderCard
+                  title="Domicile"
+                  body="Enregistre une adresse depuis la recherche."
+                  actionLabel={selectedPlace ? 'Définir depuis la sélection' : 'Sélectionne une adresse'}
+                  onAction={
+                    selectedPlace
+                      ? () => handleStartSaveSelectedPlace('home')
+                      : undefined
+                  }
+                />
               )}
 
               {workPlace ? (
@@ -1751,7 +1868,16 @@ function App() {
                   editingError={editingSavedPlaceError}
                 />
               ) : (
-                <PlaceholderCard title="Travail" body="Ajoute ton travail pour lancer un trajet en un geste." />
+                <PlaceholderCard
+                  title="Travail"
+                  body="Ajoute ton travail pour lancer un trajet en un geste."
+                  actionLabel={selectedPlace ? 'Définir depuis la sélection' : 'Sélectionne une adresse'}
+                  onAction={
+                    selectedPlace
+                      ? () => handleStartSaveSelectedPlace('work')
+                      : undefined
+                  }
+                />
               )}
             </div>
 
@@ -1775,9 +1901,19 @@ function App() {
                 ))}
               </div>
             ) : (
-              <p className="panel-copy">
-                Sélectionne une adresse dans la recherche, puis enregistre-la ici.
-              </p>
+              <div className="empty-note">
+                <p className="panel-copy">
+                  Ajoute un premier lieu nommé pour pouvoir le retrouver d’un geste.
+                </p>
+                {selectedPlace ? (
+                  <button
+                    className="ghost-button compact-action"
+                    onClick={() => handleStartSaveSelectedPlace('saved')}
+                  >
+                    Ajouter ce lieu
+                  </button>
+                ) : null}
+              </div>
             )}
           </section>
         ) : null}
@@ -1919,19 +2055,37 @@ function App() {
             ) : null}
 
             {selectedItinerary ? (
-              <div className="stack-list step-stack">
-                {selectedItinerary.segments.map((segment) => (
-                  <div key={segment.id} className={`step-card mode-${segment.mode}`}>
-                    <div className="itinerary-topline">
-                      <strong>{segment.label}</strong>
-                      <span>{segment.durationMin} min</span>
+              <>
+                <div className="inline-actions">
+                  <button
+                    className="secondary-button compact-action"
+                    onClick={handlePreviewSelectedItinerary}
+                  >
+                    Voir sur la carte
+                  </button>
+                </div>
+                <div className="stack-list step-stack">
+                  {selectedItinerary.segments.map((segment, index) => (
+                    <div key={segment.id} className={`step-card mode-${segment.mode}`}>
+                      <div className="itinerary-step-row">
+                        <span className="step-index">{index + 1}</span>
+                        <div className="step-copy">
+                          <div className="itinerary-topline">
+                            <strong>{segmentInstruction(segment)}</strong>
+                            <span>{segment.durationMin} min</span>
+                          </div>
+                          <p>
+                            {segment.from.label} → {segment.to.label}
+                          </p>
+                          <small className="panel-copy">
+                            {formatDistanceKm(segment.distanceKm)}
+                          </small>
+                        </div>
+                      </div>
                     </div>
-                    <p>
-                      {segment.from.label} → {segment.to.label}
-                    </p>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             ) : null}
 
             {planWarnings.map((warning) => (
@@ -1973,8 +2127,31 @@ function App() {
         <section className="sidebar-section compact-controls map-section">
           <div className="section-topline">
             <p className="section-eyebrow">Carte</p>
-            <span className="panel-copy">{serviceStatusSummary}</span>
+            <span className="panel-copy">
+              {mapLiveScope === 'network'
+                ? `${mapLive?.entities.length ?? 0} véhicules affichés`
+                : `${mapLive?.entities.length ?? 0} véhicules ciblés`}
+            </span>
           </div>
+          <div className="mode-switch scope-switch">
+            <button
+              className={`mode-pill ${mapLiveScope === 'network' ? 'active' : ''}`}
+              onClick={() => setMapLiveScope('network')}
+            >
+              Tout Montréal
+            </button>
+            <button
+              className={`mode-pill ${mapLiveScope === 'focus' ? 'active' : ''}`}
+              onClick={() => setMapLiveScope('focus')}
+            >
+              Vue ciblée
+            </button>
+          </div>
+          <p className="panel-copy">
+            {mapLiveScope === 'network'
+              ? `${liveSummary.busRealtime} bus • ${liveSummary.metroEstimated} métros • ${liveSummary.remEstimated} REM sur tout le réseau`
+              : `${mapLiveSummary.busRealtime} bus • ${mapLiveSummary.metroEstimated} métros • ${mapLiveSummary.remEstimated} REM dans la vue courante`}
+          </p>
           <div className="mode-switch view-switch">
             {(
               [
@@ -1993,6 +2170,7 @@ function App() {
               </button>
             ))}
           </div>
+          <p className="panel-copy">{serviceStatusSummary}</p>
         </section>
 
         <section className="sidebar-section appearance-section">
@@ -2246,12 +2424,31 @@ function SavedPlaceEditor({
   )
 }
 
-function PlaceholderCard({ title, body }: { title: string; body: string }) {
+function PlaceholderCard({
+  title,
+  body,
+  actionLabel,
+  onAction,
+}: {
+  title: string
+  body: string
+  actionLabel?: string
+  onAction?: () => void
+}) {
   return (
     <div className="saved-card placeholder">
       <span className="saved-place-kind">{title}</span>
       <strong>{title}</strong>
       <small>{body}</small>
+      {actionLabel ? (
+        <button
+          className="ghost-button compact-action"
+          onClick={() => onAction?.()}
+          disabled={!onAction}
+        >
+          {actionLabel}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -2276,6 +2473,14 @@ function deriveModes(
       : (['bus', 'metro', 'rem'] satisfies TransportMode[])
   }
 
+  if (viewMode === 'combined' || viewMode === 'bixi') {
+    return ['bus', 'metro', 'rem']
+  }
+
+  return [viewMode]
+}
+
+function modesFromViewMode(viewMode: ViewMode): TransportMode[] {
   if (viewMode === 'combined' || viewMode === 'bixi') {
     return ['bus', 'metro', 'rem']
   }
@@ -2466,8 +2671,206 @@ function liveStatusLine(live: LiveResponse | null, isFetchingLive: boolean) {
   return `Mis à jour à ${formatted} • environ toutes les 8 secondes`
 }
 
+function filterLiveResponse(
+  live: LiveResponse | null,
+  bootstrap: BootstrapResponse | null,
+  input: {
+    modes: TransportMode[]
+    routeIds?: string[]
+    selectedStation?: { id: string; lat: number; lon: number; routeIds: string[] } | null
+  },
+) {
+  if (!live) {
+    return null
+  }
+
+  const effectiveModes = new Set(input.modes)
+  const routeFilter = new Set(input.routeIds?.filter(Boolean) ?? [])
+  const selectedStation = input.selectedStation ?? null
+  const selectedStationRoutes = new Set(selectedStation?.routeIds ?? [])
+
+  const entities = live.entities.filter((entity) => {
+    if (!effectiveModes.has(entity.mode)) {
+      return false
+    }
+
+    if (routeFilter.size > 0 && !routeFilter.has(entity.routeId)) {
+      return false
+    }
+
+    if (!selectedStation) {
+      return true
+    }
+
+    if (selectedStationRoutes.has(entity.routeId)) {
+      return true
+    }
+
+    return haversineKm(entity.lat, entity.lon, selectedStation.lat, selectedStation.lon) <= 1.1
+  })
+
+  const serviceStates = live.serviceStates.filter((state) => {
+    if (!effectiveModes.has(state.mode)) {
+      return false
+    }
+
+    if (routeFilter.size > 0) {
+      return routeFilter.has(state.routeId)
+    }
+
+    if (selectedStation) {
+      return selectedStationRoutes.has(state.routeId)
+    }
+
+    return state.status !== 'normal' || state.mode !== 'bus'
+  })
+
+  if (routeFilter.size > 0 && bootstrap) {
+    for (const routeId of routeFilter) {
+      if (serviceStates.some((state) => state.routeId === routeId)) {
+        continue
+      }
+
+      const route = bootstrap.routes.find((entry) => entry.id === routeId)
+      if (!route) {
+        continue
+      }
+
+      serviceStates.unshift({
+        routeId,
+        mode: route.mode,
+        status: 'normal',
+        message:
+          route.mode === 'bus'
+            ? 'Aucune perturbation publique signalée pour cette ligne.'
+            : 'Service surveillé, sans alerte spécifique.',
+        updatedAt: live.sourceTimestamp || live.generatedAt,
+      })
+    }
+  }
+
+  return {
+    ...live,
+    entities,
+    serviceStates,
+  } satisfies LiveResponse
+}
+
+function stabilizeLiveResponse(previous: LiveResponse | null, next: LiveResponse) {
+  if (!previous) {
+    return next
+  }
+
+  const nextTimestamp = Date.parse(next.sourceTimestamp || next.generatedAt)
+  if (!Number.isFinite(nextTimestamp)) {
+    return next
+  }
+
+  const incomingIds = new Set(next.entities.map((entity) => entity.id))
+  const carried = previous.entities.filter((entity) => {
+    if (incomingIds.has(entity.id)) {
+      return false
+    }
+
+    const updatedAt = Date.parse(entity.updatedAt || previous.sourceTimestamp || previous.generatedAt)
+    return Number.isFinite(updatedAt) && nextTimestamp - updatedAt <= 18_000
+  })
+
+  if (carried.length === 0) {
+    return next
+  }
+
+  return {
+    ...next,
+    entities: [...next.entities, ...carried],
+  }
+}
+
 function formatDistanceKm(distanceKm: number) {
   return `${distanceKm.toFixed(distanceKm >= 10 ? 0 : 1)} km`
+}
+
+function segmentInstruction(segment: Itinerary['segments'][number]) {
+  if (segment.mode === 'walking') {
+    return `Marcher jusqu’à ${segment.to.label}`
+  }
+
+  if (segment.mode === 'cycling' || segment.mode === 'bixi') {
+    return `Rouler jusqu’à ${segment.to.label}`
+  }
+
+  return `${segment.label} jusqu’à ${segment.to.label}`
+}
+
+function readAccountCache(userId: string) {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(`${ACCOUNT_CACHE_PREFIX}:${userId}`)
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as {
+      favorites?: FavoriteItem[]
+      profile?: UserProfile
+    } | null
+
+    return {
+      favorites: Array.isArray(parsed?.favorites) ? parsed.favorites : [],
+      profile: sanitizeCachedProfile(parsed?.profile),
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeAccountCache(
+  userId: string,
+  input: Partial<{
+    favorites: FavoriteItem[]
+    profile: UserProfile
+  }>,
+) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const previous = readAccountCache(userId)
+  const payload = {
+    favorites: input.favorites ?? previous?.favorites ?? [],
+    profile: input.profile ?? previous?.profile ?? DEFAULT_PROFILE,
+  }
+
+  try {
+    window.localStorage.setItem(
+      `${ACCOUNT_CACHE_PREFIX}:${userId}`,
+      JSON.stringify(payload),
+    )
+  } catch {
+    // Ignore storage quota or private-mode failures.
+  }
+}
+
+function sanitizeCachedProfile(profile: unknown): UserProfile {
+  if (!profile || typeof profile !== 'object') {
+    return DEFAULT_PROFILE
+  }
+
+  const value = profile as Partial<UserProfile>
+
+  return {
+    displayName: typeof value.displayName === 'string' ? value.displayName : '',
+    savedPlaces: Array.isArray(value.savedPlaces) ? value.savedPlaces : [],
+    locationPreference:
+      value.locationPreference === 'granted' ||
+      value.locationPreference === 'denied' ||
+      value.locationPreference === 'prompt-dismissed'
+        ? value.locationPreference
+        : 'unknown',
+  }
 }
 
 function uniqueStrings(values: string[]) {

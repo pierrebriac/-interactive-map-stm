@@ -52,6 +52,7 @@ interface MapViewProps {
   currentLocation: ResolvedPlace | null
   itinerary: Itinerary | null
   viewMode: ViewMode
+  liveScope: 'network' | 'focus'
   mapStyle: MapStyle
   routeFocusIds: string[]
   cameraRequest: MapCameraRequest | null
@@ -72,6 +73,7 @@ export function MapView({
   currentLocation,
   itinerary,
   viewMode,
+  liveScope,
   mapStyle,
   routeFocusIds,
   cameraRequest,
@@ -90,6 +92,7 @@ export function MapView({
     currentLocation,
     itinerary,
     viewMode,
+    liveScope,
     routeFocusIds,
     onSelectItem,
   })
@@ -104,10 +107,11 @@ export function MapView({
       currentLocation,
       itinerary,
       viewMode,
+      liveScope,
       routeFocusIds,
       onSelectItem,
     }
-  }, [bootstrap, currentLocation, live, onSelectItem, itinerary, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
+  }, [bootstrap, currentLocation, live, liveScope, onSelectItem, itinerary, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) {
@@ -144,16 +148,32 @@ export function MapView({
           current.viewMode,
           current.selectedItem,
           current.routeFocusIds,
+          current.liveScope,
         ),
       )
       stationSource.setData(
-        buildStationCollection(current.bootstrap, current.viewMode, current.selectedItem),
+        buildStationCollection(
+          current.bootstrap,
+          current.viewMode,
+          current.selectedItem,
+          current.liveScope,
+        ),
       )
       busSource.setData(
-        buildBusCollection(current.live, current.selectedItem, current.routeFocusIds),
+        buildBusCollection(
+          current.live,
+          current.selectedItem,
+          current.routeFocusIds,
+          current.liveScope,
+        ),
       )
       railSource.setData(
-        buildRailCollection(current.live, current.selectedItem, current.routeFocusIds),
+        buildRailCollection(
+          current.live,
+          current.selectedItem,
+          current.routeFocusIds,
+          current.liveScope,
+        ),
       )
       itinerarySource.setData(buildItineraryCollection(current.itinerary))
       itineraryPointSource.setData(buildItineraryPointCollection(current.itinerary))
@@ -294,16 +314,20 @@ export function MapView({
       return
     }
 
-    routeSource.setData(buildRouteCollection(bootstrap, viewMode, selectedItem, routeFocusIds))
-    stationSource.setData(buildStationCollection(bootstrap, viewMode, selectedItem))
-    busSource.setData(buildBusCollection(live, selectedItem, routeFocusIds))
-    railSource.setData(buildRailCollection(live, selectedItem, routeFocusIds))
+    routeSource.setData(
+      buildRouteCollection(bootstrap, viewMode, selectedItem, routeFocusIds, liveScope),
+    )
+    stationSource.setData(
+      buildStationCollection(bootstrap, viewMode, selectedItem, liveScope),
+    )
+    busSource.setData(buildBusCollection(live, selectedItem, routeFocusIds, liveScope))
+    railSource.setData(buildRailCollection(live, selectedItem, routeFocusIds, liveScope))
     itinerarySource.setData(buildItineraryCollection(itinerary))
     itineraryPointSource.setData(buildItineraryPointCollection(itinerary))
     placeSource.setData(buildSelectedPlaceCollection(selectedPlace))
     savedPlaceSource.setData(buildSavedPlaceCollection(savedPlaces))
     currentLocationSource.setData(buildCurrentLocationCollection(currentLocation))
-  }, [bootstrap, currentLocation, itinerary, live, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
+  }, [bootstrap, currentLocation, itinerary, live, liveScope, routeFocusIds, savedPlaces, selectedItem, selectedPlace, viewMode])
 
   useEffect(() => {
     const map = mapRef.current
@@ -552,14 +576,37 @@ function ensureLayers(map: Map) {
   })
 
   addLayerIfMissing(map, {
+    id: 'selected-place-ring',
+    type: 'circle',
+    source: 'selected-place',
+    paint: {
+      'circle-radius': 16,
+      'circle-color': 'rgba(17, 19, 24, 0.14)',
+      'circle-stroke-width': 0,
+    },
+  })
+
+  addLayerIfMissing(map, {
     id: 'selected-place',
     type: 'circle',
     source: 'selected-place',
     paint: {
-      'circle-radius': 9,
+      'circle-radius': 10.5,
       'circle-color': '#111318',
       'circle-stroke-width': 3,
       'circle-stroke-color': '#f7f4ef',
+    },
+  })
+
+  addLayerIfMissing(map, {
+    id: 'saved-places-halo',
+    type: 'circle',
+    source: 'saved-places',
+    paint: {
+      'circle-radius': ['coalesce', ['get', 'haloRadius'], 13.5],
+      'circle-color': ['coalesce', ['get', 'haloColor'], 'rgba(20, 104, 255, 0.16)'],
+      'circle-stroke-width': 0,
+      'circle-opacity': 0.9,
     },
   })
 
@@ -568,11 +615,11 @@ function ensureLayers(map: Map) {
     type: 'circle',
     source: 'saved-places',
     paint: {
-      'circle-radius': ['coalesce', ['get', 'radius'], 7.8],
+      'circle-radius': ['coalesce', ['get', 'radius'], 8.8],
       'circle-color': ['get', 'color'],
-      'circle-stroke-width': 2.6,
+      'circle-stroke-width': 3,
       'circle-stroke-color': '#fffef8',
-      'circle-opacity': 0.92,
+      'circle-opacity': 0.96,
     },
   })
 
@@ -580,17 +627,17 @@ function ensureLayers(map: Map) {
     id: 'saved-place-labels',
     type: 'symbol',
     source: 'saved-places',
-    minzoom: 11,
+    minzoom: 9.5,
     layout: {
       'text-field': ['get', 'label'],
       'text-font': ['Open Sans Semibold'],
-      'text-size': 11,
-      'text-offset': [0, 1.2],
+      'text-size': 11.5,
+      'text-offset': [0, 1.3],
     },
     paint: {
-      'text-color': '#1c2c35',
+      'text-color': '#13202a',
       'text-halo-color': '#fffef8',
-      'text-halo-width': 1.1,
+      'text-halo-width': 1.35,
     },
   })
 
@@ -599,8 +646,8 @@ function ensureLayers(map: Map) {
     type: 'circle',
     source: 'current-location',
     paint: {
-      'circle-radius': 14,
-      'circle-color': 'rgba(20, 104, 255, 0.18)',
+      'circle-radius': 18,
+      'circle-color': 'rgba(20, 104, 255, 0.16)',
       'circle-stroke-width': 0,
     },
   })
@@ -610,9 +657,9 @@ function ensureLayers(map: Map) {
     type: 'circle',
     source: 'current-location',
     paint: {
-      'circle-radius': 7.2,
+      'circle-radius': 8.4,
       'circle-color': '#1468ff',
-      'circle-stroke-width': 3,
+      'circle-stroke-width': 3.2,
       'circle-stroke-color': '#fffef8',
     },
   })
@@ -650,20 +697,36 @@ function buildRouteCollection(
   viewMode: ViewMode,
   selectedItem: SearchItem | FavoriteItem | null,
   routeFocusIds: string[],
+  liveScope: 'network' | 'focus',
 ): FeatureCollection<LineString> {
   if (!bootstrap) {
     return EMPTY_COLLECTION
   }
 
   const modes = visibleModes(viewMode)
-  const focusSet = new Set(routeFocusIds)
+  const focusSet = new Set(liveScope === 'focus' ? routeFocusIds : [])
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
-  const selectedStationId = selectedItem?.type === 'station' ? selectedItem.id : null
+  const selectedStationId =
+    liveScope === 'focus' && selectedItem?.type === 'station'
+      ? selectedItem.id
+      : null
   const selectedStationRoutes = new Set(
     bootstrap.stations.find((station) => station.id === selectedStationId)?.routeIds ?? [],
   )
 
   const shapes = bootstrap.shapes.filter((shape) => {
+    if (!modes.has(shape.mode)) {
+      return false
+    }
+
+    if (liveScope === 'network') {
+      if (shape.mode === 'bus') {
+        return selectedRouteId ? shape.routeId === selectedRouteId : false
+      }
+
+      return true
+    }
+
     if (selectedRouteId) {
       return shape.routeId === selectedRouteId || focusSet.has(shape.routeId)
     }
@@ -676,10 +739,6 @@ function buildRouteCollection(
       return focusSet.has(shape.routeId)
     }
 
-    if (!modes.has(shape.mode)) {
-      return false
-    }
-
     return shape.mode !== 'bus'
   })
 
@@ -688,6 +747,7 @@ function buildRouteCollection(
     features: shapes.map((shape) => {
       const route = bootstrap.routes.find((entry) => entry.id === shape.routeId)
       return routeToFeature(shape, route ?? null, {
+        liveScope,
         selectedRouteId,
         focusSet,
         selectedStationRoutes,
@@ -700,13 +760,17 @@ function buildStationCollection(
   bootstrap: BootstrapResponse | null,
   viewMode: ViewMode,
   selectedItem: SearchItem | FavoriteItem | null,
+  liveScope: 'network' | 'focus',
 ): FeatureCollection<Point> {
   if (!bootstrap) {
     return EMPTY_COLLECTION
   }
 
   const modes = visibleModes(viewMode)
-  const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
+  const selectedRouteId =
+    liveScope === 'focus' && selectedItem?.type === 'route'
+      ? selectedItem.id
+      : null
   const selectedStationId = selectedItem?.type === 'station' ? selectedItem.id : null
 
   const stations = bootstrap.stations.filter((station) => {
@@ -733,6 +797,7 @@ function buildBusCollection(
   live: LiveResponse | null,
   selectedItem: SearchItem | FavoriteItem | null,
   routeFocusIds: string[],
+  liveScope: 'network' | 'focus',
 ): FeatureCollection<Point> {
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
   const focusSet = new Set(routeFocusIds)
@@ -742,7 +807,8 @@ function buildBusCollection(
     type: 'FeatureCollection',
     features: entities.map((entity) => {
       const isSelected = selectedRouteId === entity.routeId
-      const isFocused = focusSet.size === 0 || focusSet.has(entity.routeId)
+      const isFocused =
+        liveScope === 'network' || focusSet.size === 0 || focusSet.has(entity.routeId)
 
       return {
         type: 'Feature',
@@ -755,9 +821,10 @@ function buildBusCollection(
           routeId: entity.routeId,
           label: entity.label,
           color: isSelected ? '#0f1720' : '#1468ff',
-          radius: isSelected ? 9.5 : isFocused ? 7.6 : 5.8,
-          opacity: isSelected ? 0.98 : isFocused ? 0.9 : 0.16,
-          textOpacity: isSelected ? 0.9 : isFocused ? 0.82 : 0.1,
+          radius: isSelected ? 9.5 : liveScope === 'network' ? 6.7 : isFocused ? 7.6 : 5.8,
+          opacity: isSelected ? 0.98 : liveScope === 'network' ? 0.92 : isFocused ? 0.9 : 0.16,
+          textOpacity:
+            isSelected ? 0.9 : liveScope === 'network' ? 0.82 : isFocused ? 0.82 : 0.1,
         },
       }
     }),
@@ -768,6 +835,7 @@ function buildRailCollection(
   live: LiveResponse | null,
   selectedItem: SearchItem | FavoriteItem | null,
   routeFocusIds: string[],
+  liveScope: 'network' | 'focus',
 ): FeatureCollection<Point> {
   const selectedRouteId = selectedItem?.type === 'route' ? selectedItem.id : null
   const focusSet = new Set(routeFocusIds)
@@ -781,7 +849,8 @@ function buildRailCollection(
     type: 'FeatureCollection',
     features: entities.map((entity) => {
       const isSelected = selectedRouteId === entity.routeId
-      const isFocused = focusSet.size === 0 || focusSet.has(entity.routeId)
+      const isFocused =
+        liveScope === 'network' || focusSet.size === 0 || focusSet.has(entity.routeId)
 
       return {
         type: 'Feature',
@@ -794,9 +863,9 @@ function buildRailCollection(
           routeId: entity.routeId,
           label: entity.label,
           color: routeColorForMode(entity.routeId, entity.mode),
-          radius: isSelected ? 10 : 8,
-          opacity: isFocused ? 0.95 : 0.22,
-          textOpacity: isFocused ? 0.88 : 0.14,
+          radius: isSelected ? 10 : liveScope === 'network' ? 7.6 : 8,
+          opacity: liveScope === 'network' ? 0.94 : isFocused ? 0.95 : 0.22,
+          textOpacity: liveScope === 'network' ? 0.86 : isFocused ? 0.88 : 0.14,
         },
       }
     }),
@@ -910,7 +979,14 @@ function buildSavedPlaceCollection(savedPlaces: SavedPlace[]): FeatureCollection
             : place.kind === 'work'
               ? '#111318'
               : '#1468ff',
-        radius: place.kind === 'saved' ? 6.6 : 8.4,
+        haloColor:
+          place.kind === 'home'
+            ? 'rgba(239, 68, 68, 0.16)'
+            : place.kind === 'work'
+              ? 'rgba(17, 19, 24, 0.14)'
+              : 'rgba(20, 104, 255, 0.16)',
+        haloRadius: place.kind === 'saved' ? 13.2 : 15.2,
+        radius: place.kind === 'saved' ? 7.2 : 9.2,
       },
     })),
   }
@@ -942,6 +1018,7 @@ function routeToFeature(
   shape: ShapeFeature,
   route: RouteSummary | null,
   input: {
+    liveScope: 'network' | 'focus'
     selectedRouteId: string | null
     focusSet: Set<string>
     selectedStationRoutes: Set<string>
@@ -951,8 +1028,29 @@ function routeToFeature(
   const isFocused = input.focusSet.has(shape.routeId)
   const isStationContext = input.selectedStationRoutes.has(shape.routeId)
   const lineOpacity =
-    isSelected ? 0.98 : isFocused ? 0.88 : isStationContext ? 0.72 : 0.34
-  const textOpacity = isSelected || isFocused || isStationContext ? 0.88 : 0.18
+    input.liveScope === 'network'
+      ? isSelected
+        ? 0.98
+        : shape.mode === 'bus'
+          ? 0.74
+          : 0.56
+      : isSelected
+        ? 0.98
+        : isFocused
+          ? 0.88
+          : isStationContext
+            ? 0.72
+            : 0.34
+  const textOpacity =
+    input.liveScope === 'network'
+      ? isSelected
+        ? 0.92
+        : shape.mode === 'bus'
+          ? 0.64
+          : 0.44
+      : isSelected || isFocused || isStationContext
+        ? 0.88
+        : 0.18
 
   return {
     type: 'Feature',

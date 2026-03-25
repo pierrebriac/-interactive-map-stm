@@ -15,6 +15,7 @@ import type {
 async function apiRequest<T>(input: string, init?: RequestInit) {
   const response = await fetch(input, init)
   const rawText = await response.text()
+  const contentType = response.headers.get('content-type') ?? ''
   let payload: unknown = null
 
   if (rawText) {
@@ -28,6 +29,15 @@ async function apiRequest<T>(input: string, init?: RequestInit) {
   if (!response.ok) {
     const message = formatApiErrorMessage(payload, rawText, response.status)
     throw new Error(message)
+  }
+
+  if (
+    typeof input === 'string' &&
+    input.startsWith('/api/') &&
+    payload === null &&
+    contentType.includes('text/html')
+  ) {
+    throw new Error('Réponse API invalide. Le déploiement Netlify ne route pas correctement cette requête.')
   }
 
   return payload as T
